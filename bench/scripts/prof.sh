@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Function-level profile of the Rust bench per query kind (build with --features profile).
-B=${B:-lucene-rs/target-prof/release/bench}
+B=${B:-../target-prof/release/bench}  # build: cargo build --release -p lucene-rs-bench --features lucene-rs/profile --target-dir target-prof
 for k in ${@:-or and term}; do
   echo "== $k"
   perf record -q -F 4999 -o /tmp/perf-$k.data $B idx-rust data/q-$k.tsv bench 20 60 >/dev/null 2>&1

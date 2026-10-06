@@ -9,7 +9,7 @@ repository = "https://github.com/pc-style/lucene-rs"
 readme = "README.md"
 keywords = ["search", "lucene", "full-text", "bm25", "inverted-index"]
 categories = ["text-processing", "database-implementations", "data-structures"]
-exclude = ["/bench", "/.github", "/scripts", "/docs/*.png"]
+exclude = ["/bench", "/.github", "/scripts", "/.cargo"]
 
 [dependencies]
 crc32fast = "1.5.2"

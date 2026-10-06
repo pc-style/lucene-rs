@@ -32,21 +32,29 @@ with open(f"{DATA}/corpus.txt", "w") as out:
 print("docs", n)
 
 queries = []
+phrases = []
 terms = set()
 for line in open(f"{DATA}/queries-sbg.txt"):
     q = json.loads(line)
     tag = q["tags"][0]
-    if tag not in ("intersection", "union"):
-        continue
     toks = norm(q["query"].replace("+", " ")).split()
     if len(toks) < 2:
+        continue
+    if tag == "phrase":
+        if toks not in phrases:
+            phrases.append(toks)
+        continue
+    if tag not in ("intersection", "union"):
         continue
     queries.append(("AND" if tag == "intersection" else "OR", toks))
     terms.update(toks)
 
 random.seed(42)
 term_qs = [("TERM", [t]) for t in random.sample(sorted(terms), 300)]
-with open(f"{DATA}/queries.tsv", "w") as out:
+with open(f"{DATA}/queries.final.tsv", "w") as out:
     for kind, toks in term_qs + queries:
         out.write(f"{kind}\t{' '.join(toks)}\n")
-print("queries", len(term_qs) + len(queries))
+with open(f"{DATA}/queries.phrase.tsv", "w") as out:
+    for toks in phrases:
+        out.write(f"PHRASE\t{' '.join(toks)}\n")
+print("queries", len(term_qs) + len(queries), "phrases", len(phrases))

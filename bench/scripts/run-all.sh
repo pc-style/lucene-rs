@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end: data, both indexes, equivalence checks, benchmark. Run from the repo root.
-# Needs: java/javac 21 on PATH, cargo, uv, curl, jq.
+# End-to-end benchmark: data, both engines' indexes, equivalence checks, timing.
+# Run from anywhere; needs java/javac 21+, cargo, uv, curl. About 4 GB of disk.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 V=10.5.2
 mkdir -p jars data results
 for a in lucene-core lucene-analysis-common; do
@@ -15,22 +16,22 @@ done
   https://raw.githubusercontent.com/quickwit-oss/search-benchmark-game/master/queries.txt
 [ -f data/corpus.txt ] || uv run -q scripts/prep.py data
 
-(cd lucene-rs && cargo build --release -q)
+(cd .. && cargo build --release -q -p lucene-rs-bench)
 CP="java/classes:jars/lucene-core-$V.jar:jars/lucene-analysis-common-$V.jar"
 javac -cp "$CP" -d java/classes java/Indexer.java java/Bench.java
-JAVA="java -Xms4g -Xmx4g --add-modules jdk.incubator.vector"
+JAVA="java -Xms8g -Xmx8g --add-modules jdk.incubator.vector -cp $CP"
 
-lucene-rs/target/release/index data/corpus.txt idx-rust
-$JAVA -Xms8g -Xmx8g -cp "$CP" Indexer data/corpus.txt idx-lucene 2>/dev/null
-lucene-rs/target/release/bench idx-rust data/queries.tsv filter data/queries.final.tsv
+../target/release/index data/corpus.txt idx-rust
+../target/release/index data/corpus.txt idx-rust-pos --positions
+$JAVA Indexer data/corpus.txt idx-lucene 2>/dev/null
+$JAVA Indexer data/corpus.txt idx-lucene-pos --positions 2>/dev/null
 
-lucene-rs/target/release/bench idx-rust data/queries.final.tsv check
-lucene-rs/target/release/bench idx-rust data/queries.final.tsv dump results-rust.tsv
-$JAVA -cp "$CP" Bench idx-lucene data/queries.final.tsv dump results-lucene.tsv 2>/dev/null
-python3 scripts/compare.py results-lucene.tsv results-rust.tsv
-
-for r in 1 2 3; do
-  lucene-rs/target/release/bench idx-rust data/queries.final.tsv bench 50 30 > results/rust-$r.json
-  $JAVA -cp "$CP" Bench idx-lucene data/queries.final.tsv bench 50 30 2>/dev/null > results/lucene-$r.json
+for set in final:idx-rust:idx-lucene phrase:idx-rust-pos:idx-lucene-pos; do
+  IFS=: read -r name rust lucene <<< "$set"
+  ../target/release/bench "$rust" "data/queries.$name.tsv" dump "results-rust-$name.tsv"
+  $JAVA Bench "$lucene" "data/queries.$name.tsv" dump "results-lucene-$name.tsv" 2>/dev/null
+  python3 scripts/compare.py "results-lucene-$name.tsv" "results-rust-$name.tsv"
 done
-python3 scripts/analyze.py
+
+scripts/bench-all.sh
+python3 scripts/report.py

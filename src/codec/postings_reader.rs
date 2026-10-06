@@ -838,7 +838,7 @@ mod tests {
     fn prefix_sum_matches_scalar() {
         let mut src = [0u32; BLOCK_SIZE];
         for (i, v) in src.iter_mut().enumerate() {
-            *v = (i as u32 * 2_654_435_761) % 1000;
+            *v = (i as u32).wrapping_mul(2_654_435_761) % 1000;
         }
         let mut dst = [0i32; BLOCK_SIZE + 1];
         prefix_sum(&src, &mut dst, 12345);

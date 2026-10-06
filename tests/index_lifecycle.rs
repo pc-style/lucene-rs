@@ -229,6 +229,7 @@ fn corruption_is_detected() {
     std::fs::write(&path, &bytes).unwrap();
     let r = DirectoryReader::open(dir.path()).unwrap();
     assert!(matches!(r.check_integrity(), Err(Error::Corrupt(_))));
+    drop(r); // unmap before rewriting the file (required on Windows)
     // a truncated file fails to open
     std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
     assert!(matches!(

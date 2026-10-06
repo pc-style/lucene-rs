@@ -1,68 +1,164 @@
-# Is the JVM Lucene's bottleneck? A Rust port of Lucene's search core
+# lucene-rs
 
-Prompted by [@notpronsh](https://x.com/notpronsh/status/2107411015335887120): "Can someone port Lucene (`ElasticSearch`'s core algorithm) to Rust... I just wanna know if the JVM is a bottleneck".
+[![CI](https://github.com/pc-style/lucene-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/pc-style/lucene-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/lucene-rs.svg)](https://crates.io/crates/lucene-rs)
+[![docs.rs](https://img.shields.io/docsrs/lucene-rs)](https://docs.rs/lucene-rs)
 
-`lucene-rs/` is a port of the code a Lucene 10.5.2 top-10 BM25 query actually runs, written against the Lucene sources. It covers the index format, scoring, and the dynamic-pruning query algorithms. Both engines then answer the same queries over the same Wikipedia index, and their results are checked to be identical before any timing.
+A Rust port of the core of [Apache Lucene](https://lucene.apache.org/) 10.5: the Lucene104
+postings format, BM25 scoring, Lucene's block-max top-k algorithms, segment-based indexing
+with deletes and merges, analyzers and the classic query parser.
 
-## Answer
+It started as an answer to "is the JVM Lucene's bottleneck?". Port the code a Lucene query
+actually runs, check the answers are identical, then time both.
 
-The JVM is not *the* bottleneck, but it is a real tax:
+- **Same answers.** Across 1,201 benchmark queries on 469k Wikipedia articles, lucene-rs
+  returns the same top-10 documents as Lucene 10.5.2 in the same order, with bit-identical
+  float scores and identical hit counts.
+- **Faster.** 1.6x faster per query on term, AND and OR queries, 2x on phrase queries, and
+  over 150x faster to open an index (no JVM warm-up).
 
-- **Steady state (fully JIT-warmed):** the Rust port is **1.41× faster overall** (1.28× on AND, 1.47× on OR, 1.61× on single-term queries). The gap scales with query work: the median ratio is 1.3–1.55× whether a query takes 10 µs or 1 ms. Lucene's fixed per-query overhead is only about 3.5 µs larger.
-- **Cold start:** the JVM pays for class loading and JIT. Opening the index takes 360 ms vs 1.4 ms. The first pass over all 901 queries takes 620 ms vs 98 ms (**6.3×**). One process that opens the index and answers 3 queries takes 0.55 s vs under 10 ms.
-- Most of the steady-state cost is the algorithms and data layout, which both engines share. In an async-profiler run of Lucene on OR queries, the clearly JVM-specific item is `MemorySegment` access with its bounds and session checks on mmap'd reads (`ScopedMemoryAccess`, `MemorySessionImpl.checkValidStateRaw`): about 8% of samples. The Rust side was not profiled because `perf` isn't installed in this orb, so the rest of the gap is not attributed.
+## Quick start
 
-## Results
+```toml
+[dependencies]
+lucene-rs = "0.1"
+```
 
-Machine: Amp orb, 8 vCPU Intel Xeon @ 2.60GHz (AVX-512), 15 GB RAM. Single-threaded search. Each query is the median of 30 timed passes after 50 warm-up passes (~45k queries). The table is the median of 3 alternating runs.
+```rust
+use lucene_rs::{
+    DirectoryReader, Document, Field, IndexSearcher, IndexWriter, IndexWriterConfig, QueryParser,
+    StandardAnalyzer, Store, Term,
+};
 
-| query type (n) | Rust port mean | Lucene 10.5.2 / JDK 21 mean | Lucene / Rust |
-|---|---:|---:|---:|
-| TERM (300) | 33.7 µs | 54.5 µs | 1.61× |
-| AND, 2–4 terms (300) | 128.0 µs | 164.0 µs | 1.28× |
-| OR, 2–4 terms (301) | 137.1 µs | 202.1 µs | 1.47× |
-| all (901) | 99.7 µs | 140.2 µs | 1.41× |
-| first pass over all 901 queries | 98 ms | 620 ms | 6.3× |
-| index open | 1.4 ms | 360 ms | |
+fn main() -> lucene_rs::Result<()> {
+    let mut writer = IndexWriter::open("my-index", IndexWriterConfig::default())?;
+    writer.add_document(
+        &Document::new()
+            .with(Field::string("id", "1", Store::Yes))
+            .with(Field::text("title", "Rust in Action", Store::Yes))
+            .with(Field::text("body", "systems programming in rust", Store::No)),
+    )?;
+    writer.update_document(Term::new("id", "1"), &Document::new() /* ... */)?;
+    writer.commit()?;
 
-Lucene variants tried, as mean µs for TERM / AND / OR:
+    let searcher = IndexSearcher::new(DirectoryReader::open("my-index")?);
+    let query = QueryParser::new("body", StandardAnalyzer::new())
+        .parse("\"systems programming\" +title:rust -draft")?;
+    for hit in searcher.search(&query, 10)?.score_docs {
+        println!("{:.3} {:?}", hit.score, searcher.doc(hit.doc)?.get_str("title"));
+    }
+    Ok(())
+}
+```
 
-| JVM config | TERM | AND | OR |
-|---|---:|---:|---:|
-| JDK 21, G1, Panama vectors (baseline above) | 54.5 | 164.0 | 202.1 |
-| JDK 21, `ParallelGC` | 53.3 | 163.1 | 194.5 |
-| JDK 21, 200 warm-up passes instead of 50 | 55.1 | 166.4 | 202.2 |
-| JDK 21, no `jdk.incubator.vector` (scalar fallback) | 56.0 | 200.5 | 233.1 |
-| JDK 25, G1, Panama vectors | 61.0 | 182.4 | 239.6 |
+Queries can also be built directly:
 
-Rust variants: a portable x86-64 build (no `target-cpu=native`) measured 34.0 / 136.3 / 143.4 µs, so the result does not depend on AVX-512 codegen.
+```rust
+use lucene_rs::{BooleanQuery, PhraseQuery, Query};
 
-## Correctness: same answers, bit for bit
+let q = BooleanQuery::new()
+    .must(PhraseQuery::new("body").term("new").term("york").build())
+    .should(Query::term("title", "guide").boost(2.0))
+    .must_not(Query::term("tags", "draft"))
+    .build();
+```
 
-- `scripts/compare.py results-lucene.tsv results-rust.tsv`: for all 901 queries, top-10 doc IDs are identical and in the same order, all 8,986 scores are bit-identical float32 values, and total-hit counts are identical. Matching total-hit counts means the collector's 1000-hit threshold and the block skipping fire at the same points.
-- `bench idx-rust queries check`: the pruned (block-max) top-10 equals exhaustive scoring for all 901 queries.
-- The postings file is 191,864,423 bytes vs Lucene's `.doc` at 191,867,686 bytes: same encoding, give or take headers and the sign of impact norm deltas.
+See [`examples/basic.rs`](examples/basic.rs) for a complete program.
 
-## What was ported
+## Command-line tool
 
-| Rust | Lucene 10.5.2 |
+```sh
+cargo install lucene-rs --features cli
+
+lucene-rs index  ./idx docs.jsonl --keyword id --keyword tags   # one JSON object per line
+lucene-rs search ./idx '"full text" +title:search -draft' -n 5  # JSON Lines results
+lucene-rs delete ./idx id 42
+lucene-rs merge  ./idx --max-segments 1
+lucene-rs stats  ./idx
+lucene-rs check  ./idx                                          # verify every checksum
+```
+
+## What is ported
+
+| lucene-rs | Lucene 10.5 |
 |---|---|
-| `forutil.rs` | `ForUtil` (256-int blocks, 8/16/32-bit lane layout), `PForUtil` (patched FOR for freqs) |
-| `postings_writer.rs` | `Lucene104PostingsWriter` (FOR or bitset doc blocks, vInt15 skip headers, level-0 skip data every 256 docs, level-1 every 8192, impacts), `CompetitiveImpactAccumulator` |
-| `postings_reader.rs` | `Lucene104PostingsReader.BlockPostingsEnum` (lazy freq decode, `advanceShallow`, `nextPostings`, impacts), `FixedBitSet.intoArray`, `VectorUtil.findNextGEQ` |
-| `sim.rs` | `SmallFloat.intToByte4` norms, `BM25Similarity` (k1=1.2, b=0.75, same float ops) |
-| `search.rs` | `TermScorer`, `MaxScoreCache`, `ImpactsDISI`, `BatchScoreBulkScorer`, `MaxScoreBulkScorer`, `BlockMaxConjunctionBulkScorer`, `ScorerUtil`, `TopScoreDocCollector` (1000-hit threshold) |
-| `index.rs` | not a port: in-memory inverter and a simple block term dictionary in place of `IndexWriter` and BlockTree/FST |
+| `codec::forutil` (+ generated `forutil_gen`) | `ForUtil`, `PForUtil`: 256-value FOR/PFOR blocks in Lucene's 8/16/32-bit lane layout |
+| `codec::postings_writer`, `codec::postings_reader` | `Lucene104PostingsWriter`/`Reader`: FOR or bitset doc blocks, PFOR freqs and positions, two-level skip data with impacts, lazy freq decoding |
+| `sim` | `SmallFloat` norms, `BM25Similarity` (same float operations) |
+| `search::term_scorer` | `TermScorer`, `MaxScoreCache`, `ImpactsDISI` |
+| `search::bulk` | `BatchScoreBulkScorer`, `MaxScoreBulkScorer`, `BlockMaxConjunctionBulkScorer`, `ScorerUtil` |
+| `search::collector` | `TopScoreDocCollector` (exact hit counts up to 1,000, then dynamic pruning) |
+| `search::scorer` | `ConjunctionScorer`, `DisjunctionSumScorer`, `ReqExclScorer`, `ReqOptSumScorer`, exact `PhraseScorer` |
+| `search::query` | `TermQuery`, `BooleanQuery`, `PhraseQuery`, `BoostQuery`, `ConstantScoreQuery`, `MatchAllDocsQuery`, rewrite rules |
+| `index` | `IndexWriter`, `DirectoryReader`, `SegmentInfos`, `LogDocMergePolicy`, live docs, `CodecUtil` checksums |
+| `analysis` | `StandardAnalyzer` (UAX#29), `WhitespaceAnalyzer`, `SimpleAnalyzer`, `KeywordAnalyzer`, `PerFieldAnalyzerWrapper` |
+| `queryparser` | classic `QueryParser` |
 
-About 2,600 lines of Rust. Dependencies: `memmap2` and `rustc-hash`.
+### Not yet
 
-## Scope and caveats
+Numeric points and range queries, doc values and sorting by field, vectors, highlighting,
+wildcard/fuzzy/regex queries, sloppy phrases, stored-field compression, concurrent indexing
+and search threads, and other similarities than BM25. The file format follows Lucene104's
+postings layout but is not file-compatible with Lucene; the term dictionary is a simpler
+block index instead of BlockTree/FST.
 
-- One text field, one segment (Lucene force-merged to 1), no deletions, `DOCS_AND_FREQS` (no positions, so no phrase queries). Lucene is configured the same way.
-- Both engines get identical tokens: the corpus is pre-normalized (lowercase, `[a-z0-9]` runs) and Lucene uses `WhitespaceTokenizer`.
-- The indexer is not a port of `IndexWriter`, so indexing time is not comparable. For reference: Rust 28 s, Lucene 69 s plus 9 s `forceMerge`.
-- One cloud VM. Per-type mean latencies varied by under 5% between runs; Lucene's cold-pass time varied more (614–710 ms).
+## Correctness
 
-## Reproduce
+- **Against Lucene.** `bench/` indexes the same corpus with both engines and diffs the top-10
+  of every query. Result: 1,201/1,201 queries identical (docs, order, bit-identical scores,
+  hit counts). See [`bench/README.md`](bench/README.md).
+- **Against a brute-force model.** `tests/random_vs_reference.rs` indexes random documents
+  across many segments (flushes and merges) and checks 1,500 random queries of every shape
+  against BM25 computed directly from the raw tokens. Planting bugs in the pruning or matching
+  logic makes it fail.
+- **Lifecycle.** `tests/index_lifecycle.rs` covers updates and deletes across flushes and
+  merges, commit visibility, reopen, locking, rollback, corruption detection and the parser.
 
-Needs JDK 21, Rust, `uv`, and ~4 GB of disk. `scripts/run-all.sh` downloads 3 English Wikipedia parquet shards (468,867 articles, 299M tokens) and the search-benchmark-game AOL queries, builds both indexes, verifies equivalence, and benchmarks.
+## Performance
+
+Single-threaded mean latency per query (median of 30 timed runs per query after warm-up),
+469k English Wikipedia articles, 8-vCPU Xeon @ 2.6 GHz. Lucene 10.5.2 on JDK 21 with the
+Panama vector module enabled.
+
+| queries | lucene-rs | Lucene | speedup |
+|---|---:|---:|---:|
+| single term (300) | 27.7 µs | 54.9 µs | 1.98x |
+| AND of 2–4 terms (300) | 109.8 µs | 165.0 µs | 1.50x |
+| OR of 2–4 terms (301) | 122.7 µs | 203.5 µs | 1.66x |
+| exact phrase (300) | 369.9 µs | 728.3 µs | 1.97x |
+| open index | 2.2 ms | 378 ms | |
+| first pass over 901 queries (cold) | 106 ms | 672 ms | 6.3x |
+
+Methodology, percentiles and the JVM experiments (GC choice, JDK 25, vector API on and off)
+are in [`bench/README.md`](bench/README.md).
+
+For best performance build with `RUSTFLAGS="-C target-cpu=native"`: the block decoders and
+doc-ID scans then use AVX2/AVX-512 (a portable build measured 1–6% slower).
+
+## Safety and lints
+
+The crate builds with the strict clippy configuration from
+[xearch](https://github.com/pc-style/xearch) (`pedantic` and `nursery` denied, plus
+`unwrap_used`, `panic`, `indexing_slicing`, `arithmetic_side_effects`, `as_conversions`, ...).
+Numeric lints are relaxed only inside the bit-level kernels ported from Lucene, and there are
+two audited `unsafe` blocks: memory-mapping index files and an AVX2 prefix sum. Slice indexing
+is bounds-checked everywhere, so a corrupt index can make a search panic but cannot cause an
+out-of-bounds read; `check_integrity` verifies the CRC32 footer of every file. Details:
+[`docs/lints.md`](docs/lints.md).
+
+## Development
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+bench/scripts/run-all.sh   # full Lucene comparison (downloads ~1 GB, needs JDK 21+)
+```
+
+`src/codec/forutil_gen.rs` is generated: `python3 scripts/gen_forutil.py > src/codec/forutil_gen.rs`.
+
+## License
+
+Apache License 2.0, like Lucene. lucene-rs contains code ported from Apache Lucene; see
+[`NOTICE`](NOTICE). "Apache Lucene" and "Lucene" are trademarks of The Apache Software
+Foundation. This project is independent and not affiliated with or endorsed by the ASF.
