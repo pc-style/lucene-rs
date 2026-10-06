@@ -54,7 +54,14 @@ def load(path):
                 for hit in encoded_hits.split():
                     doc, score = hit.split(":")
                     hits.append((unsigned(doc, 2**32 - 1), f32_bits(score)))
-                rows.append(Row(kind, terms, unsigned(total, 2**64 - 1), relation, hits))
+                total = unsigned(total, 2**64 - 1)
+                if len(hits) > 10:
+                    raise ValueError("top-10 dump has more than ten hits")
+                if len({doc for doc, _ in hits}) != len(hits):
+                    raise ValueError("duplicate document ID in top-10 hits")
+                if total < len(hits):
+                    raise ValueError("reported hit value is smaller than the hit vector")
+                rows.append(Row(kind, terms, total, relation, hits))
             except (ValueError, OverflowError, struct.error) as error:
                 raise ValueError(f"{path}:{number}: {error}") from error
     if not rows:
