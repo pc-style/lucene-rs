@@ -72,8 +72,13 @@ pub struct Bm25 {
 
 /// `BM25Similarity#idf`: `ln(1 + (docCount - docFreq + 0.5) / (docFreq + 0.5))`.
 #[must_use]
+#[allow(
+    clippy::imprecise_flops,
+    reason = "Match Lucene's Math.log(1 + x) rounding rather than log1p(x)"
+)]
 pub fn idf(doc_freq: u64, doc_count: u64) -> f32 {
-    (((doc_count as i64 - doc_freq as i64) as f64 + 0.5) / (doc_freq as f64 + 0.5)).ln_1p() as f32
+    (1.0 + ((doc_count as i64 - doc_freq as i64) as f64 + 0.5) / (doc_freq as f64 + 0.5)).ln()
+        as f32
 }
 
 /// `BM25Similarity#avgFieldLength`.
