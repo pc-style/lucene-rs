@@ -71,5 +71,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v$VERSION" "target/package/lucene-rs-$VERSION.crate" \
+          gh release create "v$VERSION" \
             --target "$GITHUB_SHA" --title "lucene-rs v$VERSION" --generate-notes

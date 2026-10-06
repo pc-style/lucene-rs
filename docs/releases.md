@@ -19,7 +19,8 @@ Add a crates.io token with permission to publish `lucene-rs` as the repository A
    without `v`. Leave **dry_run** checked for a rehearsal: it runs all checks without
    publishing, creating tags or creating a GitHub release.
 3. Run again with **dry_run** unchecked to publish to crates.io, then create `vVERSION`
-   and a GitHub release with generated notes and the `.crate` archive attached.
+   and a GitHub release with generated notes and GitHub's source archives. Download the
+   published crate from crates.io; the workflow does not depend on Cargo retaining a local archive.
 
 Equivalent CLI commands:
 
