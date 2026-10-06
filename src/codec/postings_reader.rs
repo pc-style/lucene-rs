@@ -1,5 +1,18 @@
-//! Port of Lucene104PostingsReader.BlockPostingsEnum for the configuration used by top-k
-//! scoring queries: needsFreq = true, needsImpacts = true, no positions.
+//! Port of `Lucene104PostingsReader.BlockPostingsEnum` (no payloads/offsets). One enum type
+//! serves top-k scoring (impacts), phrase matching (positions) and merging (full iteration).
+// Numeric kernel ported 1:1 from Lucene: indexes, offsets and integer casts mirror the Java
+// source and sit on hot paths, so the numeric lints are relaxed here (and only here). Slice
+// indexing stays bounds-checked: a corrupt index panics, it never reads out of bounds.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::cast_precision_loss
+)]
 
 use crate::codec::forutil::{self, BLOCK_SIZE};
 use crate::codec::postings_writer::{LEVEL1_NUM_DOCS, TermMeta};
@@ -9,6 +22,7 @@ use crate::pool::{Pooled, recyclable};
 pub const NO_MORE_DOCS: i32 = i32::MAX;
 const LEVEL1: i32 = LEVEL1_NUM_DOCS as i32;
 const BLOCK: i32 = BLOCK_SIZE as i32;
+const NONE: usize = usize::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Encoding {
@@ -16,7 +30,7 @@ enum Encoding {
     Unary,
 }
 
-/// DocAndFloatFeatureBuffer
+/// `DocAndFloatFeatureBuffer`: a batch of docs and per-doc features (freqs, then scores).
 pub struct DocAndFreqBuffer {
     pub docs: Vec<i32>,
     pub features: Vec<f32>,
@@ -25,32 +39,39 @@ pub struct DocAndFreqBuffer {
 
 impl Default for DocAndFreqBuffer {
     fn default() -> Self {
-        Self { docs: vec![0; BLOCK_SIZE + 1], features: vec![0.0; BLOCK_SIZE + 1], size: 0 }
+        Self {
+            docs: vec![0; BLOCK_SIZE + 1],
+            features: vec![0.0; BLOCK_SIZE + 1],
+            size: 0,
+        }
     }
 }
 
-/// Lucene's Impacts.getImpacts(level) result.
-pub struct FreqNormBuffer {
-    pub freqs: Vec<u32>,
-    pub norms: Vec<u8>,
+/// What the field was indexed with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexedFeatures {
+    pub freqs: bool,
+    pub positions: bool,
 }
 
-/// Per-enum block buffers. Every element is written before it is read, so recycled buffers
-/// need no clearing.
+/// Per-enum block buffers. Every element is written before it is read (the freq buffer of a
+/// docs-only field is filled with 1 on creation), so recycled buffers need no clearing.
 struct Buffers {
     doc_buffer: [i32; BLOCK_SIZE + 1],
     freq_buffer: [u32; BLOCK_SIZE],
     scratch: [u32; BLOCK_SIZE],
+    pos_delta_buffer: [u32; BLOCK_SIZE],
     doc_bitset: [u64; BLOCK_SIZE / 2],
     doc_cumulative_word_pop_counts: [i32; BLOCK_SIZE / 2],
 }
 
 impl Default for Buffers {
     fn default() -> Self {
-        Buffers {
+        Self {
             doc_buffer: [0; BLOCK_SIZE + 1],
             freq_buffer: [0; BLOCK_SIZE],
             scratch: [0; BLOCK_SIZE],
+            pos_delta_buffer: [0; BLOCK_SIZE],
             doc_bitset: [0; BLOCK_SIZE / 2],
             doc_cumulative_word_pop_counts: [0; BLOCK_SIZE / 2],
         }
@@ -59,12 +80,16 @@ impl Default for Buffers {
 recyclable!(Buffers);
 recyclable!(DocAndFreqBuffer);
 
+#[allow(clippy::struct_excessive_bools)] // mirrors BlockPostingsEnum's flags
 pub struct PostingsEnum<'a> {
     data: &'a [u8],
     pos: usize,
     b: Pooled<Buffers>,
     doc_bitset_base: i32,
     encoding: Encoding,
+    index_has_freq: bool,
+    index_has_pos: bool,
+    needs_pos: bool,
 
     doc: i32,
     prev_doc_id: i32,
@@ -85,23 +110,54 @@ pub struct PostingsEnum<'a> {
 
     level0_impacts: (usize, usize),
     level1_impacts: (usize, usize),
+
+    // positions
+    pos_data: &'a [u8],
+    pos_fp: usize,
+    pos_buffer_upto: usize,
+    pos_pending_count: u64,
+    pos_doc_buffer_upto: usize,
+    position: u32,
+    last_pos_block_fp: usize,
+    level0_pos_end_fp: usize,
+    level0_block_pos_upto: usize,
+    level1_pos_end_fp: usize,
+    level1_block_pos_upto: usize,
 }
 
-const NO_FREQ_FP: usize = usize::MAX;
-
 impl<'a> PostingsEnum<'a> {
-    /// BlockPostingsEnum#reset
-    pub fn new(data: &'a [u8], meta: &TermMeta) -> Box<Self> {
+    /// Equivalent of `BlockPostingsEnum#reset`. `pos_data` may be empty unless `needs_pos`.
+    #[must_use]
+    pub fn new(
+        data: &'a [u8],
+        pos_data: &'a [u8],
+        meta: &TermMeta,
+        features: IndexedFeatures,
+        needs_pos: bool,
+    ) -> Box<Self> {
+        assert!(
+            !needs_pos || features.positions,
+            "field was indexed without positions"
+        );
+        let pos_start = meta.pos_start_fp as usize;
+        let total_term_freq = if features.freqs {
+            meta.total_term_freq
+        } else {
+            meta.doc_freq as u64
+        };
         let mut e = Box::new(PostingsEnum {
             data,
             pos: 0,
             b: Pooled::take(),
             doc_bitset_base: 0,
             encoding: Encoding::Packed,
+            index_has_freq: features.freqs,
+            index_has_pos: features.positions,
+            needs_pos,
             doc: -1,
             prev_doc_id: -1,
             doc_count_left: meta.doc_freq as i32,
-            freq_fp: NO_FREQ_FP,
+            freq_fp: NONE,
             level0_last_doc_id: -1,
             level0_doc_end_fp: 0,
             level1_last_doc_id: -1,
@@ -111,11 +167,29 @@ impl<'a> PostingsEnum<'a> {
             doc_buffer_upto: BLOCK_SIZE,
             needs_refilling: false,
             doc_freq: meta.doc_freq as i32,
-            total_term_freq: meta.total_term_freq,
+            total_term_freq,
             singleton_doc_id: meta.singleton_doc_id,
             level0_impacts: (0, 0),
             level1_impacts: (0, 0),
+            pos_data,
+            pos_fp: pos_start,
+            pos_buffer_upto: BLOCK_SIZE,
+            pos_pending_count: 0,
+            pos_doc_buffer_upto: BLOCK_SIZE,
+            position: 0,
+            last_pos_block_fp: match total_term_freq.cmp(&(BLOCK_SIZE as u64)) {
+                std::cmp::Ordering::Less => pos_start,
+                std::cmp::Ordering::Equal => NONE,
+                std::cmp::Ordering::Greater => pos_start + meta.last_pos_block_offset as usize,
+            },
+            level0_pos_end_fp: pos_start,
+            level0_block_pos_upto: 0,
+            level1_pos_end_fp: pos_start,
+            level1_block_pos_upto: 0,
         });
+        if !features.freqs {
+            e.b.freq_buffer.fill(1);
+        }
         if e.doc_freq < LEVEL1 {
             e.level1_last_doc_id = NO_MORE_DOCS;
             if e.doc_freq > 1 {
@@ -129,29 +203,30 @@ impl<'a> PostingsEnum<'a> {
     }
 
     #[inline]
-    fn input(&self) -> In<'a> {
+    const fn input(&self) -> In<'a> {
         In::new(self.data, self.pos)
     }
 
     #[inline]
-    pub fn doc_id(&self) -> i32 {
+    #[must_use]
+    pub const fn doc_id(&self) -> i32 {
         self.doc
     }
 
     #[inline]
-    pub fn cost(&self) -> i64 {
+    #[must_use]
+    pub const fn cost(&self) -> i64 {
         self.doc_freq as i64
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-
     #[cfg_attr(not(feature = "profile"), inline)]
     pub fn freq(&mut self) -> u32 {
-        if self.freq_fp != NO_FREQ_FP {
+        if self.freq_fp != NONE {
             let mut input = In::new(self.data, self.freq_fp);
             forutil::pfor_decode(&mut input, &mut self.b.freq_buffer);
             self.pos = input.pos;
-            self.freq_fp = NO_FREQ_FP;
+            self.freq_fp = NONE;
         }
         self.b.freq_buffer[self.doc_buffer_upto - 1]
     }
@@ -184,12 +259,15 @@ impl<'a> PostingsEnum<'a> {
             self.b.doc_cumulative_word_pop_counts[num_longs - 1] = BLOCK;
             self.encoding = Encoding::Unary;
         }
-        self.freq_fp = input.pos;
-        forutil::pfor_skip(&mut input);
+        if self.index_has_freq {
+            self.freq_fp = input.pos;
+            forutil::pfor_skip(&mut input);
+        }
         self.pos = input.pos;
         self.doc_count_left -= BLOCK;
         self.prev_doc_id = self.b.doc_buffer[BLOCK_SIZE - 1];
         self.doc_buffer_upto = 0;
+        self.pos_doc_buffer_upto = 0;
     }
 
     fn refill_remainder(&mut self) {
@@ -205,24 +283,27 @@ impl<'a> PostingsEnum<'a> {
             let mut input = self.input();
             // PostingsUtil#readVIntBlock
             input.read_group_vints(&mut self.b.doc_buffer, n);
-            for i in 0..n {
-                let v = self.b.doc_buffer[i] as u32;
-                self.b.doc_buffer[i] = (v >> 1) as i32;
-                self.b.freq_buffer[i] = if v & 1 != 0 { 1 } else { input.read_vint() };
+            if self.index_has_freq {
+                for i in 0..n {
+                    let v = self.b.doc_buffer[i] as u32;
+                    self.b.doc_buffer[i] = (v >> 1) as i32;
+                    self.b.freq_buffer[i] = if v & 1 != 0 { 1 } else { input.read_vint() };
+                }
             }
             self.pos = input.pos;
             let mut acc = self.prev_doc_id;
-            for d in self.b.doc_buffer[..n].iter_mut() {
+            for d in &mut self.b.doc_buffer[..n] {
                 acc += *d;
                 *d = acc;
             }
             self.b.doc_buffer[n] = NO_MORE_DOCS;
-            self.freq_fp = NO_FREQ_FP;
+            self.freq_fp = NONE;
             self.doc_buffer_size = n;
             self.doc_count_left = 0;
         }
         self.prev_doc_id = self.b.doc_buffer[BLOCK_SIZE - 1];
         self.doc_buffer_upto = 0;
+        self.pos_doc_buffer_upto = 0;
         self.encoding = Encoding::Packed;
     }
 
@@ -236,12 +317,13 @@ impl<'a> PostingsEnum<'a> {
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-
     fn skip_level1_to(&mut self, target: i32) {
         loop {
             self.prev_doc_id = self.level1_last_doc_id;
             self.level0_last_doc_id = self.level1_last_doc_id;
             self.pos = self.level1_doc_end_fp;
+            self.level0_pos_end_fp = self.level1_pos_end_fp;
+            self.level0_block_pos_upto = self.level1_block_pos_upto;
             self.doc_count_left = self.doc_freq - self.level1_doc_count_upto;
             self.level1_doc_count_upto += LEVEL1;
             if self.doc_count_left < LEVEL1 {
@@ -252,12 +334,18 @@ impl<'a> PostingsEnum<'a> {
             self.level1_last_doc_id += input.read_vint() as i32;
             let delta = input.read_vlong() as usize;
             self.level1_doc_end_fp = delta + input.pos;
-            let _skip1_len = input.read_short();
-            let num_impact_bytes = input.read_short() as usize;
-            if self.level1_last_doc_id >= target {
-                self.level1_impacts = (input.pos, num_impact_bytes);
+            if self.index_has_freq {
+                let _skip1_len = input.read_short();
+                let num_impact_bytes = input.read_short() as usize;
+                if self.level1_last_doc_id >= target {
+                    self.level1_impacts = (input.pos, num_impact_bytes);
+                }
+                input.pos += num_impact_bytes;
+                if self.index_has_pos {
+                    self.level1_pos_end_fp += input.read_vlong() as usize;
+                    self.level1_block_pos_upto = input.read_byte() as usize;
+                }
             }
-            input.pos += num_impact_bytes;
             self.pos = input.pos;
             if self.level1_last_doc_id >= target {
                 break;
@@ -266,17 +354,32 @@ impl<'a> PostingsEnum<'a> {
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-
     fn do_move_to_next_level0_block(&mut self) {
+        if self.needs_pos {
+            if self.level0_pos_end_fp >= self.pos_fp {
+                self.pos_fp = self.level0_pos_end_fp;
+                self.pos_pending_count = self.level0_block_pos_upto as u64;
+                self.pos_buffer_upto = BLOCK_SIZE;
+            } else {
+                debug_assert_eq!(self.freq_fp, NONE);
+                self.pos_pending_count += self.freq_sum(self.pos_doc_buffer_upto, BLOCK_SIZE);
+            }
+        }
         if self.doc_count_left >= BLOCK {
             let mut input = self.input();
             input.read_vlong(); // level0NumBytes
             self.level0_last_doc_id += input.read_vint15() as i32;
             let block_length = input.read_vlong15() as usize;
             self.level0_doc_end_fp = input.pos + block_length;
-            let num_impact_bytes = input.read_vint() as usize;
-            self.level0_impacts = (input.pos, num_impact_bytes);
-            input.pos += num_impact_bytes;
+            if self.index_has_freq {
+                let num_impact_bytes = input.read_vint() as usize;
+                self.level0_impacts = (input.pos, num_impact_bytes);
+                input.pos += num_impact_bytes;
+                if self.index_has_pos {
+                    self.level0_pos_end_fp += input.read_vlong() as usize;
+                    self.level0_block_pos_upto = input.read_byte() as usize;
+                }
+            }
             self.pos = input.pos;
             self.refill_full_block();
         } else {
@@ -294,10 +397,13 @@ impl<'a> PostingsEnum<'a> {
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-
     fn skip_level0_to(&mut self, target: i32) {
+        let mut pos_fp;
+        let mut pos_upto;
         loop {
             self.prev_doc_id = self.level0_last_doc_id;
+            pos_fp = self.level0_pos_end_fp;
+            pos_upto = self.level0_block_pos_upto;
             if self.doc_count_left >= BLOCK {
                 let mut input = self.input();
                 let num_skip_bytes = input.read_vlong() as usize;
@@ -306,9 +412,16 @@ impl<'a> PostingsEnum<'a> {
                 let found = target <= self.level0_last_doc_id;
                 let block_length = input.read_vlong15() as usize;
                 self.level0_doc_end_fp = input.pos + block_length;
-                if found {
+                if self.index_has_freq && (found || self.needs_pos) {
                     let num_impact_bytes = input.read_vint() as usize;
-                    self.level0_impacts = (input.pos, num_impact_bytes);
+                    if found {
+                        self.level0_impacts = (input.pos, num_impact_bytes);
+                    }
+                    input.pos += num_impact_bytes;
+                    if self.needs_pos {
+                        self.level0_pos_end_fp += input.read_vlong() as usize;
+                        self.level0_block_pos_upto = input.read_byte() as usize;
+                    }
                 }
                 self.pos = skip0_end;
                 if found {
@@ -320,6 +433,21 @@ impl<'a> PostingsEnum<'a> {
                 self.level0_last_doc_id = NO_MORE_DOCS;
                 break;
             }
+        }
+        if self.needs_pos {
+            self.seek_pos_data(pos_fp, pos_upto);
+        }
+    }
+
+    fn seek_pos_data(&mut self, pos_fp: usize, pos_upto: usize) {
+        // If pos_fp is behind, the positions of the next block's first docs are already
+        // decoded: just account for the remaining freqs of this block.
+        if pos_fp >= self.pos_fp {
+            self.pos_fp = pos_fp;
+            self.pos_pending_count = pos_upto as u64;
+            self.pos_buffer_upto = BLOCK_SIZE;
+        } else {
+            self.pos_pending_count += self.freq_sum(self.pos_doc_buffer_upto, BLOCK_SIZE);
         }
     }
 
@@ -342,17 +470,18 @@ impl<'a> PostingsEnum<'a> {
 
     #[inline]
     fn next_set_bit(&self, index: usize) -> i32 {
+        let bits = &self.b.doc_bitset;
         let mut i = index >> 6;
-        let word = self.b.doc_bitset[i] >> (index & 63);
+        let word = bits[i] >> (index & 63);
         if word != 0 {
             return (index + word.trailing_zeros() as usize) as i32;
         }
         loop {
             i += 1;
-            if i >= self.b.doc_bitset.len() {
+            if i >= bits.len() {
                 return NO_MORE_DOCS;
             }
-            let w = self.b.doc_bitset[i];
+            let w = bits[i];
             if w != 0 {
                 return ((i << 6) + w.trailing_zeros() as usize) as i32;
             }
@@ -360,7 +489,6 @@ impl<'a> PostingsEnum<'a> {
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
-
     pub fn next_doc(&mut self) -> i32 {
         if self.doc == self.level0_last_doc_id || self.needs_refilling {
             if self.needs_refilling {
@@ -391,8 +519,12 @@ impl<'a> PostingsEnum<'a> {
         }
         match self.encoding {
             Encoding::Packed => {
-                let next =
-                    find_next_geq(&self.b.doc_buffer, target, self.doc_buffer_upto, self.doc_buffer_size);
+                let next = find_next_geq(
+                    &self.b.doc_buffer,
+                    target,
+                    self.doc_buffer_upto,
+                    self.doc_buffer_size,
+                );
                 self.doc = self.b.doc_buffer[next];
                 self.doc_buffer_upto = next + 1;
             }
@@ -413,12 +545,17 @@ impl<'a> PostingsEnum<'a> {
         if self.doc_buffer_size != 0 && self.b.doc_buffer[self.doc_buffer_size - 1] < up_to {
             self.doc_buffer_size
         } else {
-            find_next_geq(&self.b.doc_buffer, up_to, self.doc_buffer_upto, self.doc_buffer_size)
+            find_next_geq(
+                &self.b.doc_buffer,
+                up_to,
+                self.doc_buffer_upto,
+                self.doc_buffer_size,
+            )
         }
     }
 
-    /// Returns docs (and freqs as floats) of the current block that are < up_to, then advances
-    /// to up_to.
+    /// Docs (and freqs as floats) of the current block that are < `up_to`, then advances to
+    /// `up_to`. Not for use together with positions.
     #[cfg_attr(feature = "profile", inline(never))]
     pub fn next_postings(&mut self, up_to: i32, buffer: &mut DocAndFreqBuffer) {
         debug_assert!(!self.needs_refilling);
@@ -451,15 +588,90 @@ impl<'a> PostingsEnum<'a> {
         self.advance(up_to);
     }
 
-    // ---- Impacts ----
+    // ---- positions ----
+
+    fn freq_sum(&self, from: usize, to: usize) -> u64 {
+        self.b.freq_buffer[from..to].iter().map(|&f| f as u64).sum()
+    }
+
+    /// Next position of the current doc; call at most `freq()` times per doc.
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn next_position(&mut self) -> u32 {
+        debug_assert!(self.needs_pos);
+        if self.pos_doc_buffer_upto != self.doc_buffer_upto {
+            self.accumulate_pending_positions();
+            self.position = 0;
+        }
+        if self.pos_buffer_upto == BLOCK_SIZE {
+            self.refill_positions();
+            self.pos_buffer_upto = 0;
+        }
+        self.position += self.b.pos_delta_buffer[self.pos_buffer_upto];
+        self.pos_buffer_upto += 1;
+        self.pos_pending_count -= 1;
+        self.position
+    }
+
+    fn accumulate_pending_positions(&mut self) {
+        let freq = self.freq() as u64;
+        self.pos_pending_count += self.freq_sum(self.pos_doc_buffer_upto, self.doc_buffer_upto);
+        self.pos_doc_buffer_upto = self.doc_buffer_upto;
+        if self.pos_pending_count > freq {
+            self.skip_positions(freq);
+            self.pos_pending_count = freq;
+        }
+    }
+
+    fn skip_positions(&mut self, freq: u64) {
+        let mut to_skip = (self.pos_pending_count - freq) as usize;
+        let left_in_block = BLOCK_SIZE - self.pos_buffer_upto;
+        if to_skip < left_in_block {
+            self.pos_buffer_upto += to_skip;
+        } else {
+            to_skip -= left_in_block;
+            let mut input = In::new(self.pos_data, self.pos_fp);
+            while to_skip >= BLOCK_SIZE {
+                debug_assert_ne!(input.pos, self.last_pos_block_fp);
+                forutil::pfor_skip(&mut input);
+                to_skip -= BLOCK_SIZE;
+            }
+            self.pos_fp = input.pos;
+            self.refill_positions();
+            self.pos_buffer_upto = to_skip;
+        }
+    }
+
+    fn refill_positions(&mut self) {
+        let mut input = In::new(self.pos_data, self.pos_fp);
+        if self.pos_fp == self.last_pos_block_fp {
+            let count = (self.total_term_freq % BLOCK_SIZE as u64) as usize;
+            for i in 0..count {
+                self.b.pos_delta_buffer[i] = input.read_vint();
+            }
+        } else {
+            forutil::pfor_decode(&mut input, &mut self.b.pos_delta_buffer);
+        }
+        self.pos_fp = input.pos;
+    }
+
+    // ---- impacts ----
 
     #[inline]
-    pub fn num_levels(&self) -> usize {
-        if self.level1_last_doc_id == NO_MORE_DOCS { 1 } else { 2 }
+    #[must_use]
+    pub const fn num_levels(&self) -> usize {
+        if !self.index_has_freq || self.level1_last_doc_id == NO_MORE_DOCS {
+            1
+        } else {
+            2
+        }
     }
 
     #[inline]
-    pub fn doc_id_up_to(&self, level: usize) -> i32 {
+    #[must_use]
+    pub const fn doc_id_up_to(&self, level: usize) -> i32 {
+        if !self.index_has_freq {
+            return NO_MORE_DOCS;
+        }
         match level {
             0 => self.level0_last_doc_id,
             1 => self.level1_last_doc_id,
@@ -469,7 +681,11 @@ impl<'a> PostingsEnum<'a> {
 
     /// Max of `freq * norm_inverse[norm]` over the impacts of `level` (see `Bm25::score_x`).
     #[cfg_attr(feature = "profile", inline(never))]
+    #[must_use]
     pub fn max_impact_x(&self, level: usize, norm_inverse: &[f32; 256]) -> f32 {
+        if !self.index_has_freq {
+            return norm_inverse[1]; // freq 1, norm 1
+        }
         let (start, len) = if level == 0 && self.level0_last_doc_id != NO_MORE_DOCS {
             self.level0_impacts
         } else if level == 1 {
@@ -493,55 +709,31 @@ impl<'a> PostingsEnum<'a> {
         }
         max
     }
-
-    #[cfg_attr(feature = "profile", inline(never))]
-    pub fn impacts(&self, level: usize, out: &mut FreqNormBuffer) {
-        out.freqs.clear();
-        out.norms.clear();
-        let (start, len) = if level == 0 && self.level0_last_doc_id != NO_MORE_DOCS {
-            self.level0_impacts
-        } else if level == 1 {
-            self.level1_impacts
-        } else {
-            out.freqs.push(i32::MAX as u32);
-            out.norms.push(1);
-            return;
-        };
-        let mut input = In::new(self.data, start);
-        let end = start + len;
-        let (mut freq, mut norm) = (0u32, 0i64);
-        while input.pos < end {
-            let freq_delta = input.read_vint();
-            freq += 1 + (freq_delta >> 1);
-            if freq_delta & 1 != 0 {
-                norm += 1 + input.read_zlong();
-            } else {
-                norm += 1;
-            }
-            out.freqs.push(freq);
-            out.norms.push(norm as u8);
-        }
-    }
 }
 
 /// `dst[i] = base + src[0] + ... + src[i]` (Lucene104PostingsReader#prefixSum).
 #[inline]
 fn prefix_sum(src: &[u32; BLOCK_SIZE], dst: &mut [i32; BLOCK_SIZE + 1], base: i32) {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[allow(unsafe_code, clippy::cast_ptr_alignment)] // loadu/storeu are unaligned
     // SAFETY: AVX2 is enabled at compile time; loads/stores stay within the 256-element arrays.
     unsafe {
-        use std::arch::x86_64::*;
+        use std::arch::x86_64::{
+            __m256i, _mm256_add_epi32, _mm256_loadu_si256, _mm256_permute2x128_si256,
+            _mm256_permutevar8x32_epi32, _mm256_set1_epi32, _mm256_shuffle_epi32,
+            _mm256_slli_si256, _mm256_storeu_si256,
+        };
         let mut carry = _mm256_set1_epi32(base);
         let last = _mm256_set1_epi32(7);
         for c in 0..BLOCK_SIZE / 8 {
-            let mut x = _mm256_loadu_si256(src.as_ptr().add(c * 8) as *const __m256i);
+            let mut x = _mm256_loadu_si256(src.as_ptr().add(c * 8).cast::<__m256i>());
             x = _mm256_add_epi32(x, _mm256_slli_si256::<4>(x));
             x = _mm256_add_epi32(x, _mm256_slli_si256::<8>(x));
             // carry the low 128-bit lane's total into the high lane
             let t = _mm256_shuffle_epi32::<0xFF>(x);
             x = _mm256_add_epi32(x, _mm256_permute2x128_si256::<0x08>(t, t));
             x = _mm256_add_epi32(x, carry);
-            _mm256_storeu_si256(dst.as_mut_ptr().add(c * 8) as *mut __m256i, x);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(c * 8).cast::<__m256i>(), x);
             carry = _mm256_permutevar8x32_epi32(x, last);
         }
     }
@@ -551,26 +743,6 @@ fn prefix_sum(src: &[u32; BLOCK_SIZE], dst: &mut [i32; BLOCK_SIZE + 1], base: i3
         for i in 0..BLOCK_SIZE {
             acc = acc.wrapping_add(src[i] as i32);
             dst[i] = acc;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prefix_sum_matches_scalar() {
-        let mut src = [0u32; BLOCK_SIZE];
-        for (i, v) in src.iter_mut().enumerate() {
-            *v = (i as u32 * 2654435761) % 1000;
-        }
-        let mut dst = [0i32; BLOCK_SIZE + 1];
-        prefix_sum(&src, &mut dst, 12345);
-        let mut acc = 12345i32;
-        for i in 0..BLOCK_SIZE {
-            acc += src[i] as i32;
-            assert_eq!(dst[i], acc, "at {i}");
         }
     }
 }
@@ -585,9 +757,8 @@ fn find_next_geq(buffer: &[i32], target: i32, from: usize, to: usize) -> usize {
     let mut i = from;
     let scan_end = (from + 4 * W).min(to);
     while i + W <= scan_end {
-        let chunk: &[i32; W] = buffer[i..i + W].try_into().unwrap();
         let mut m = 0u32;
-        for (j, &v) in chunk.iter().enumerate() {
+        for (j, &v) in buffer[i..i + W].iter().enumerate() {
             m |= ((v >= target) as u32) << j;
         }
         if m != 0 {
@@ -614,12 +785,22 @@ fn find_next_geq(buffer: &[i32], target: i32, from: usize, to: usize) -> usize {
         }
         len -= half;
     }
-    if buffer[base] < target { base + 1 } else { base }
+    if buffer[base] < target {
+        base + 1
+    } else {
+        base
+    }
 }
 
 /// FixedBitSet#intoArray
 #[cfg_attr(feature = "profile", inline(never))]
-fn bitset_into_array(bits: &[u64], mut from: usize, to: usize, base: i32, out: &mut [i32]) -> usize {
+fn bitset_into_array(
+    bits: &[u64],
+    mut from: usize,
+    to: usize,
+    base: i32,
+    out: &mut [i32],
+) -> usize {
     let mut n = 0;
     let mut emit = |mut word: u64, base: i32, n: &mut usize| {
         while word != 0 {
@@ -639,12 +820,32 @@ fn bitset_into_array(bits: &[u64], mut from: usize, to: usize, base: i32, out: &
         emit(word, from as i32 + base, &mut n);
         from += til_next;
     }
-    for i in (from >> 6)..(to >> 6) {
-        emit(bits[i], base + (i << 6) as i32, &mut n);
+    for (i, &word) in bits.iter().enumerate().take(to >> 6).skip(from >> 6) {
+        emit(word, base + (i << 6) as i32, &mut n);
     }
     if to & 63 != 0 {
         let word = bits[to >> 6] & ((1u64 << (to & 63)) - 1);
         emit(word, base + (to & !63) as i32, &mut n);
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_sum_matches_scalar() {
+        let mut src = [0u32; BLOCK_SIZE];
+        for (i, v) in src.iter_mut().enumerate() {
+            *v = (i as u32 * 2_654_435_761) % 1000;
+        }
+        let mut dst = [0i32; BLOCK_SIZE + 1];
+        prefix_sum(&src, &mut dst, 12345);
+        let mut acc = 12345i32;
+        for i in 0..BLOCK_SIZE {
+            acc += src[i] as i32;
+            assert_eq!(dst[i], acc, "at {i}");
+        }
+    }
 }

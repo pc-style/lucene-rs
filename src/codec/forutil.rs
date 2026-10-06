@@ -1,25 +1,38 @@
-//! Port of Lucene104 ForUtil / PForUtil: 256 integers per block, bit-packed with the same
+//! Port of Lucene104 `ForUtil` / `PForUtil`: 256 integers per block, bit-packed with the same
 //! SWAR "collapse into 8/16/32-bit lanes" layout Lucene uses so decoding auto-vectorizes.
+// Numeric kernel ported 1:1 from Lucene: indexes, offsets and integer casts mirror the Java
+// source and sit on hot paths, so the numeric lints are relaxed here (and only here). Slice
+// indexing stays bounds-checked: a corrupt index panics, it never reads out of bounds.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::cast_precision_loss
+)]
 
 use crate::codec::store::{In, Out};
 
 pub const BLOCK_SIZE: usize = 256;
 const MAX_EXCEPTIONS: usize = 7;
 
-#[inline(always)]
+#[inline]
 const fn expand_mask16(m: u32) -> u32 {
     m | (m << 16)
 }
-#[inline(always)]
+#[inline]
 const fn expand_mask8(m: u32) -> u32 {
     expand_mask16(m | (m << 8))
 }
-#[inline(always)]
+#[inline]
 const fn low_bits(b: u32) -> u32 {
     if b >= 32 { u32::MAX } else { (1u32 << b) - 1 }
 }
 /// Mask of the `b` low bits of every `p`-bit lane.
-#[inline(always)]
+#[inline]
 const fn mask(p: u32, b: u32) -> u32 {
     match p {
         8 => expand_mask8(low_bits(b)),
@@ -29,6 +42,7 @@ const fn mask(p: u32, b: u32) -> u32 {
 }
 
 #[inline]
+#[must_use]
 pub fn bits_required(v: u32) -> u32 {
     (32 - v.leading_zeros()).max(1)
 }
@@ -44,7 +58,7 @@ fn collapse16(a: &mut [u32; BLOCK_SIZE]) {
     }
 }
 #[cfg(test)]
-#[inline(always)]
+#[inline]
 fn expand8(a: &mut [u32; BLOCK_SIZE]) {
     for i in 0..64 {
         let l = a[i];
@@ -55,7 +69,7 @@ fn expand8(a: &mut [u32; BLOCK_SIZE]) {
     }
 }
 #[cfg(test)]
-#[inline(always)]
+#[inline]
 fn expand16(a: &mut [u32; BLOCK_SIZE]) {
     for i in 0..128 {
         let l = a[i];
@@ -64,7 +78,8 @@ fn expand16(a: &mut [u32; BLOCK_SIZE]) {
     }
 }
 
-pub fn num_bytes(bpv: u32) -> usize {
+#[must_use]
+pub const fn num_bytes(bpv: u32) -> usize {
     (bpv as usize) << 5
 }
 
@@ -96,14 +111,14 @@ pub fn encode(ints: &mut [u32; BLOCK_SIZE], bpv: u32, out: &mut Out) {
         }
         shift -= bpv as i32;
     }
-    let rbpi = (shift + bpv as i32) as u32;
-    let mask_rbpi = mask(p, rbpi);
+    let rem_bits_per_int = (shift + bpv as i32) as u32;
+    let mask_rem_bits_per_int = mask(p, rem_bits_per_int);
     let mut tmp_idx = 0;
     let mut rbpv = bpv;
     while idx < num_ints {
-        if rbpv >= rbpi {
-            rbpv -= rbpi;
-            tmp[tmp_idx] |= (ints[idx] >> rbpv) & mask_rbpi;
+        if rbpv >= rem_bits_per_int {
+            rbpv -= rem_bits_per_int;
+            tmp[tmp_idx] |= (ints[idx] >> rbpv) & mask_rem_bits_per_int;
             tmp_idx += 1;
             if rbpv == 0 {
                 idx += 1;
@@ -111,10 +126,10 @@ pub fn encode(ints: &mut [u32; BLOCK_SIZE], bpv: u32, out: &mut Out) {
             }
         } else {
             let mask1 = mask(p, rbpv);
-            let mask2 = mask(p, rbpi - rbpv);
-            tmp[tmp_idx] |= (ints[idx] & mask1) << (rbpi - rbpv);
+            let mask2 = mask(p, rem_bits_per_int - rbpv);
+            tmp[tmp_idx] |= (ints[idx] & mask1) << (rem_bits_per_int - rbpv);
             idx += 1;
-            rbpv = bpv - rbpi + rbpv;
+            rbpv += bpv - rem_bits_per_int;
             tmp[tmp_idx] |= (ints[idx] >> rbpv) & mask2;
             tmp_idx += 1;
         }
@@ -126,7 +141,7 @@ pub fn encode(ints: &mut [u32; BLOCK_SIZE], bpv: u32, out: &mut Out) {
 
 /// Inverse of [`encode`], specialized per bit width like Lucene's generated decodeN methods.
 #[cfg(test)]
-#[inline(always)]
+#[inline]
 fn decode_impl<const B: u32>(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     let p: u32 = if B <= 8 {
         8
@@ -140,8 +155,8 @@ fn decode_impl<const B: u32>(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     let bytes = &input.data[input.pos..input.pos + nips * 4];
     input.pos += nips * 4;
     let mut tmp = [0u32; BLOCK_SIZE];
-    for (t, c) in tmp[..nips].iter_mut().zip(bytes.chunks_exact(4)) {
-        *t = u32::from_le_bytes(c.try_into().unwrap());
+    for (t, c) in tmp[..nips].iter_mut().zip(bytes.as_chunks::<4>().0) {
+        *t = u32::from_le_bytes(*c);
     }
     let mask_b = mask(p, B);
     let mut idx = 0;
@@ -197,7 +212,7 @@ macro_rules! dispatch {
     };
 }
 
-/// Decode 256 values of `bpv` bits (generated straight-line decoders, see scripts/gen_forutil.py).
+/// Decode 256 values of `bpv` bits (generated straight-line decoders, see `scripts/gen_forutil.py`).
 #[inline]
 pub fn decode(bpv: u32, input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     let n = num_bytes(bpv);
@@ -278,7 +293,7 @@ pub fn pfor_decode(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
 
 /// PForUtil#skip
 #[cfg_attr(feature = "profile", inline(never))]
-pub fn pfor_skip(input: &mut In) {
+pub const fn pfor_skip(input: &mut In) {
     let token = input.read_byte() as u32;
     let bpv = token & 0x1F;
     let num_exceptions = (token >> 5) as usize;
@@ -303,11 +318,11 @@ mod tests {
 
     #[test]
     fn for_roundtrip_all_widths() {
-        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
         for bpv in 1..=32u32 {
             for _ in 0..20 {
                 let mut vals = [0u32; BLOCK_SIZE];
-                for v in vals.iter_mut() {
+                for v in &mut vals {
                     *v = (rng(&mut seed) as u32) & low_bits(bpv);
                 }
                 vals[(rng(&mut seed) % 256) as usize] = low_bits(bpv); // force the max width
@@ -339,7 +354,7 @@ mod tests {
             },
             {
                 let mut a = [0u32; BLOCK_SIZE];
-                for v in a.iter_mut() {
+                for v in &mut a {
                     *v = 1 + (rng(&mut seed) % 4) as u32;
                 }
                 a[17] = 300;
@@ -347,8 +362,8 @@ mod tests {
             },
             {
                 let mut a = [0u32; BLOCK_SIZE];
-                for v in a.iter_mut() {
-                    *v = 1 + (rng(&mut seed) % 100000) as u32;
+                for v in &mut a {
+                    *v = 1 + (rng(&mut seed) % 100_000) as u32;
                 }
                 a
             },

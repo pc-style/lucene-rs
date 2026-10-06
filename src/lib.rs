@@ -1,8 +1,20 @@
-//! A port of Apache Lucene 10.5's core search path to Rust: Lucene104 postings format
-//! (256-doc FOR/bitset blocks, PFOR freqs, 2-level skip data with impacts), BM25 with
-//! SmallFloat norms, and the block-max top-k scorers (MaxScore, BlockMaxConjunction).
-pub mod codec;
+#![doc = include_str!("../README.md")]
+#![deny(unsafe_op_in_unsafe_fn)]
+
+pub mod analysis;
+mod codec;
+pub mod document;
+mod error;
 pub mod index;
+mod num;
 mod pool;
+pub mod queryparser;
 pub mod search;
 pub mod sim;
+
+pub use analysis::{Analyzer, StandardAnalyzer};
+pub use document::{Document, Field, FieldType, FieldValue, IndexOptions, Store};
+pub use error::{Error, Result};
+pub use index::{DirectoryReader, IndexWriter, IndexWriterConfig, OpenMode, Term};
+pub use queryparser::QueryParser;
+pub use search::{BooleanQuery, IndexSearcher, Occur, PhraseQuery, Query, ScoreDoc, TopDocs};

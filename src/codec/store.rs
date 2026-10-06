@@ -1,5 +1,18 @@
 //! Port of the parts of Lucene's DataOutput/DataInput used by the postings format.
 //! Multi-byte fixed-width values are little-endian, like Lucene 9+.
+// Numeric kernel ported 1:1 from Lucene: indexes, offsets and integer casts mirror the Java
+// source and sit on hot paths, so the numeric lints are relaxed here (and only here). Slice
+// indexing stays bounds-checked: a corrupt index panics, it never reads out of bounds.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::cast_precision_loss
+)]
 
 #[derive(Default)]
 pub struct Out {
@@ -7,45 +20,43 @@ pub struct Out {
 }
 
 impl Out {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
     #[inline]
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.buf.len()
     }
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
-    }
-    #[inline]
     pub fn clear(&mut self) {
-        self.buf.clear()
+        self.buf.clear();
     }
     #[inline]
     pub fn write_byte(&mut self, b: u8) {
-        self.buf.push(b)
+        self.buf.push(b);
     }
     #[inline]
     pub fn write_bytes(&mut self, b: &[u8]) {
-        self.buf.extend_from_slice(b)
+        self.buf.extend_from_slice(b);
     }
     /// `other.copyTo(this)`
     #[inline]
-    pub fn append(&mut self, other: &Out) {
-        self.buf.extend_from_slice(&other.buf)
+    pub fn append(&mut self, other: &Self) {
+        self.buf.extend_from_slice(&other.buf);
     }
     #[inline]
     pub fn write_short(&mut self, v: i16) {
-        self.buf.extend_from_slice(&v.to_le_bytes())
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     #[inline]
     pub fn write_int(&mut self, v: u32) {
-        self.buf.extend_from_slice(&v.to_le_bytes())
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     #[inline]
     pub fn write_long(&mut self, v: u64) {
-        self.buf.extend_from_slice(&v.to_le_bytes())
+        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     #[inline]
     pub fn write_vint(&mut self, mut v: u32) {
@@ -65,11 +76,11 @@ impl Out {
     }
     #[inline]
     pub fn write_zlong(&mut self, v: i64) {
-        self.write_vlong(((v << 1) ^ (v >> 63)) as u64)
+        self.write_vlong(((v << 1) ^ (v >> 63)) as u64);
     }
     /// Lucene104PostingsWriter#writeVInt15
     pub fn write_vint15(&mut self, v: u32) {
-        self.write_vlong15(v as u64)
+        self.write_vlong15(v as u64);
     }
     /// Lucene104PostingsWriter#writeVLong15
     pub fn write_vlong15(&mut self, v: u64) {
@@ -90,7 +101,7 @@ impl Out {
             for shift in [6, 4, 2, 0] {
                 let v = values[off];
                 off += 1;
-                let n = ((32 - (v | 1).leading_zeros()) + 7) / 8;
+                let n = (32 - (v | 1).leading_zeros()).div_ceil(8);
                 self.buf.extend_from_slice(&v.to_le_bytes()[..n as usize]);
                 flag |= ((n - 1) as u8) << shift;
             }
@@ -109,35 +120,32 @@ pub struct In<'a> {
 
 impl<'a> In<'a> {
     #[inline]
-    pub fn new(data: &'a [u8], pos: usize) -> Self {
+    #[must_use]
+    pub const fn new(data: &'a [u8], pos: usize) -> Self {
         Self { data, pos }
     }
     #[inline]
-    pub fn read_byte(&mut self) -> u8 {
+    pub const fn read_byte(&mut self) -> u8 {
         let b = self.data[self.pos];
         self.pos += 1;
         b
     }
     #[inline]
     pub fn read_short(&mut self) -> i16 {
-        let v = i16::from_le_bytes(self.data[self.pos..self.pos + 2].try_into().unwrap());
+        let d = &self.data[self.pos..self.pos + 2];
+        let v = i16::from_le_bytes([d[0], d[1]]);
         self.pos += 2;
         v
     }
     #[inline]
-    pub fn read_int(&mut self) -> u32 {
-        let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        v
-    }
-    #[inline]
     pub fn read_long(&mut self) -> u64 {
-        let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+        let d = &self.data[self.pos..self.pos + 8];
+        let v = u64::from_le_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]);
         self.pos += 8;
         v
     }
     #[inline]
-    pub fn read_vint(&mut self) -> u32 {
+    pub const fn read_vint(&mut self) -> u32 {
         let mut b = self.read_byte();
         if b < 0x80 {
             return b as u32;
@@ -154,7 +162,7 @@ impl<'a> In<'a> {
         }
     }
     #[inline]
-    pub fn read_vlong(&mut self) -> u64 {
+    pub const fn read_vlong(&mut self) -> u64 {
         let mut b = self.read_byte();
         if b < 0x80 {
             return b as u64;
@@ -171,7 +179,7 @@ impl<'a> In<'a> {
         }
     }
     #[inline]
-    pub fn read_zlong(&mut self) -> i64 {
+    pub const fn read_zlong(&mut self) -> i64 {
         let v = self.read_vlong();
         ((v >> 1) as i64) ^ -((v & 1) as i64)
     }
@@ -221,13 +229,26 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut o = Out::new();
-        let vals = [0u32, 1, 127, 128, 255, 256, 65535, 65536, 1 << 24, u32::MAX, 7, 300];
+        let vals = [
+            0u32,
+            1,
+            127,
+            128,
+            255,
+            256,
+            65535,
+            65536,
+            1 << 24,
+            u32::MAX,
+            7,
+            300,
+        ];
         o.write_group_vints(&vals);
         o.write_vint15(32767);
         o.write_vint15(32768);
         o.write_vlong15(1 << 40);
         o.write_zlong(-57);
-        o.write_zlong(1234567);
+        o.write_zlong(1_234_567);
         let mut i = In::new(&o.buf, 0);
         let mut got = [0i32; 12];
         i.read_group_vints(&mut got, 12);
@@ -236,7 +257,7 @@ mod tests {
         assert_eq!(i.read_vint15(), 32768);
         assert_eq!(i.read_vlong15(), 1 << 40);
         assert_eq!(i.read_zlong(), -57);
-        assert_eq!(i.read_zlong(), 1234567);
+        assert_eq!(i.read_zlong(), 1_234_567);
         assert_eq!(i.pos, o.len());
     }
 }

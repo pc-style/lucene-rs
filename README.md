@@ -1,6 +1,6 @@
 # Is the JVM Lucene's bottleneck? A Rust port of Lucene's search core
 
-Prompted by [@notpronsh](https://x.com/notpronsh/status/2107411015335887120): "Can someone port Lucene (ElasticSearch's core algorithm) to Rust... I just wanna know if the JVM is a bottleneck".
+Prompted by [@notpronsh](https://x.com/notpronsh/status/2107411015335887120): "Can someone port Lucene (`ElasticSearch`'s core algorithm) to Rust... I just wanna know if the JVM is a bottleneck".
 
 `lucene-rs/` is a port of the code a Lucene 10.5.2 top-10 BM25 query actually runs, written against the Lucene sources. It covers the index format, scoring, and the dynamic-pruning query algorithms. Both engines then answer the same queries over the same Wikipedia index, and their results are checked to be identical before any timing.
 
@@ -10,7 +10,7 @@ The JVM is not *the* bottleneck, but it is a real tax:
 
 - **Steady state (fully JIT-warmed):** the Rust port is **1.41× faster overall** (1.28× on AND, 1.47× on OR, 1.61× on single-term queries). The gap scales with query work: the median ratio is 1.3–1.55× whether a query takes 10 µs or 1 ms. Lucene's fixed per-query overhead is only about 3.5 µs larger.
 - **Cold start:** the JVM pays for class loading and JIT. Opening the index takes 360 ms vs 1.4 ms. The first pass over all 901 queries takes 620 ms vs 98 ms (**6.3×**). One process that opens the index and answers 3 queries takes 0.55 s vs under 10 ms.
-- Most of the steady-state cost is the algorithms and data layout, which both engines share. In an async-profiler run of Lucene on OR queries, the clearly JVM-specific item is MemorySegment access with its bounds and session checks on mmap'd reads (`ScopedMemoryAccess`, `MemorySessionImpl.checkValidStateRaw`): about 8% of samples. The Rust side was not profiled because `perf` isn't installed in this orb, so the rest of the gap is not attributed.
+- Most of the steady-state cost is the algorithms and data layout, which both engines share. In an async-profiler run of Lucene on OR queries, the clearly JVM-specific item is `MemorySegment` access with its bounds and session checks on mmap'd reads (`ScopedMemoryAccess`, `MemorySessionImpl.checkValidStateRaw`): about 8% of samples. The Rust side was not profiled because `perf` isn't installed in this orb, so the rest of the gap is not attributed.
 
 ## Results
 
@@ -30,7 +30,7 @@ Lucene variants tried, as mean µs for TERM / AND / OR:
 | JVM config | TERM | AND | OR |
 |---|---:|---:|---:|
 | JDK 21, G1, Panama vectors (baseline above) | 54.5 | 164.0 | 202.1 |
-| JDK 21, ParallelGC | 53.3 | 163.1 | 194.5 |
+| JDK 21, `ParallelGC` | 53.3 | 163.1 | 194.5 |
 | JDK 21, 200 warm-up passes instead of 50 | 55.1 | 166.4 | 202.2 |
 | JDK 21, no `jdk.incubator.vector` (scalar fallback) | 56.0 | 200.5 | 233.1 |
 | JDK 25, G1, Panama vectors | 61.0 | 182.4 | 239.6 |
