@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-06)
 
 First release.
 
@@ -19,3 +19,4 @@ First release.
   stop words.
 - Classic query parser.
 - `lucene-rs` CLI (feature `cli`): JSON Lines indexing, search, delete, merge, stats, check.
+- Cross-platform durable writes, including Windows-compatible file syncing.

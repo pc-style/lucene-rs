@@ -8,6 +8,7 @@ use crate::index::codec_util::{
 };
 use crate::num::{u32_from, usize_from};
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
 
 const CODEC: &str = "LuceneRsSegments";
@@ -132,8 +133,7 @@ impl SegmentInfos {
         write_footer(&mut out);
         let file = segments_file(self.generation);
         let tmp = dir.join(format!("pending_{file}"));
-        fs::write(&tmp, &out.buf)?;
-        File::open(&tmp)?.sync_all()?;
+        write_synced(&tmp, &out.buf)?;
         fs::rename(&tmp, dir.join(&file))?;
         sync_dir(dir);
         Ok(())
@@ -145,6 +145,15 @@ impl SegmentInfos {
             .map(|s| u64::from(s.max_doc.saturating_sub(s.del_count)))
             .sum()
     }
+}
+
+/// Writes `data` to `path` and fsyncs it through the same handle. Reopening the file read-only
+/// to sync it fails on Windows, where `FlushFileBuffers` needs write access.
+pub fn write_synced(path: &Path, data: &[u8]) -> Result<()> {
+    let mut f = File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    Ok(())
 }
 
 /// Best-effort directory fsync so renames survive a crash (no-op where unsupported).

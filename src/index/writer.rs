@@ -6,7 +6,7 @@ use crate::document::Document;
 use crate::error::{Error, Result};
 use crate::index::Term;
 use crate::index::buffer::DocumentsBuffer;
-use crate::index::commit::{PREFIX, SegmentCommitInfo, SegmentInfos, sync_dir};
+use crate::index::commit::{PREFIX, SegmentCommitInfo, SegmentInfos, sync_dir, write_synced};
 use crate::index::field_infos::FieldInfos;
 use crate::index::live_docs::LiveDocs;
 use crate::index::merge::{LogMergePolicy, merge_segments};
@@ -318,8 +318,7 @@ impl IndexWriter {
             }
             let del_gen = self.infos.new_del_gen();
             let path = self.dir.join(live_docs_file(&name, del_gen));
-            fs::write(&path, live.encode())?;
-            File::open(&path)?.sync_all()?;
+            write_synced(&path, &live.encode())?;
             if let Some(s) = self.infos.segments.iter_mut().find(|s| s.name == name) {
                 s.del_gen = del_gen;
                 s.del_count = del_count;

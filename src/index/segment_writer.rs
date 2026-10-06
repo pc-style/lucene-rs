@@ -19,13 +19,13 @@ use crate::codec::store::Out;
 use crate::document::IndexOptions;
 use crate::error::{Error, Result};
 use crate::index::codec_util::{write_footer, write_header};
+use crate::index::commit::write_synced;
 use crate::index::field_infos::FieldInfos;
 use crate::index::segment::{
     DOC_CODEC, FieldStats, NRM_CODEC, POS_CODEC, SegmentInfo, TIM_CODEC, VERSION,
 };
 use crate::index::stored::StoredFieldsWriter;
 use crate::index::terms::FieldTermsWriter;
-use std::fs::{self, File};
 use std::path::Path;
 
 /// Writes a segment field by field, term by term, doc by doc (all in sorted order).
@@ -237,10 +237,7 @@ impl SegmentWriter {
             stats,
         };
         let write = |ext: &str, data: &[u8]| -> Result<()> {
-            let path = dir.join(format!("{}.{ext}", info.name));
-            fs::write(&path, data)?;
-            File::open(&path)?.sync_all()?;
-            Ok(())
+            write_synced(&dir.join(format!("{}.{ext}", info.name)), data)
         };
         write("doc", &pw.doc_out.buf)?;
         write("pos", &pw.pos_out.buf)?;

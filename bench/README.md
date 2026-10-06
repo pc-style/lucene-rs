@@ -14,9 +14,9 @@ first for equivalence (same top-10, same scores), then for speed.
 - **Indexes**: one field `body`, one segment (`force_merge(1)` in both). Term/AND/OR queries run
   on docs+freqs indexes, phrases on indexes with positions.
 - **Harness**: `rust/` (lucene-rs public API) and `java/` (Lucene API) implement the same
-  protocol: `search(query, 10)`, single thread, one pass cold, then warm-up passes, then 30
-  timed passes; each query's median is reported. Three alternating rounds; the table uses the
-  median of the three.
+  protocol: `search(query, 10)`, single thread, one pass cold, then 50 warm-up / 30 timed
+  passes for term/AND/OR, or 20 warm-up / 20 timed passes for phrases. Each query's median
+  is reported. Three alternating rounds; the table aggregates the per-query medians of the three.
 - **Machine**: Amp orb, 8 vCPU Intel Xeon @ 2.60GHz (AVX-512), 15 GB RAM, Linux 6.1. Rust 1.99
   with `-C target-cpu=native`; JDK 21.0.12 (Temurin), `-Xms4g -Xmx4g`, G1,
   `--add-modules jdk.incubator.vector` (Lucene reports "Java vector incubator API enabled;
@@ -36,6 +36,7 @@ same points in both engines.
 
 ## Results
 
+<!-- bench:detail:start -->
 | queries | rust mean | rust p50 | rust p99 | lucene mean | lucene p50 | lucene p99 | speedup |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | TERM (300) | 27.7 µs | 20.7 µs | 121 µs | 54.9 µs | 36.3 µs | 311 µs | 1.98x |
@@ -44,8 +45,8 @@ same points in both engines.
 | all of the above (901) | 86.8 µs | 52.5 µs | 584 µs | 141.2 µs | 94.0 µs | 817 µs | 1.63x |
 | PHRASE (300) | 369.9 µs | 137.0 µs | 4033 µs | 728.3 µs | 210.8 µs | 5824 µs | 1.97x |
 
-Cold start: opening the index takes 2.2 ms vs 378 ms, and the first (unwarmed) pass over the
-901 queries 106 ms vs 672 ms.
+Cold start: opening the index takes 2.2 ms vs 378 ms, and the first (unwarmed) pass over the 901 queries 106 ms vs 672 ms.
+<!-- bench:detail:end -->
 
 ### Where the gap comes from
 
@@ -89,3 +90,8 @@ scripts/prof.sh or and  # perf profile per query kind (see the build line in the
 
 Needs JDK 21+, Rust, `uv` and ~4 GB of disk. Indexing times are not compared: the Lucene
 indexer goes through Lucene's `IndexWriter` with its own flush/merge behavior.
+
+`scripts/report.py` writes `results/summary.json` from the raw timing files and query-kind
+files. Run `python3 scripts/render.py` to regenerate both SVG themes and README tables,
+or `python3 scripts/render.py --check` to check them without writing. Rendering the checked-in
+summary needs only Python; it does not rerun benchmarks or download the corpus.

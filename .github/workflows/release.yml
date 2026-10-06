@@ -1,0 +1,74 @@
+name: Release
+
+# Publishing is never triggered by a push, tag, schedule, or completed CI run.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version in Cargo.toml (without v)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Validate and package only; do not publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crate-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate release request
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as f:
+              package = tomllib.load(f)['package']
+          if os.environ['VERSION'] != package['version']:
+              raise SystemExit('Requested version must match Cargo.toml')
+          PY
+
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify package
+        run: cargo publish -p lucene-rs --locked --all-features --dry-run
+      - name: Publish crate
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo 'Missing CARGO_REGISTRY_TOKEN secret'; exit 1; }
+          cargo publish -p lucene-rs --locked --all-features
+      - name: Create GitHub release at the tested commit
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" "target/package/lucene-rs-$VERSION.crate" \
+            --target "$GITHUB_SHA" --title "lucene-rs v$VERSION" --generate-notes

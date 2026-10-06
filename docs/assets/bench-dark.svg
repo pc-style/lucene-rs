@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="494" viewBox="0 0 860 494" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" role="img" aria-labelledby="title desc">
+<title id="title">lucene-rs vs Apache Lucene 10.5.2</title>
+<desc id="desc">single term (300): lucene-rs 27.7 µs, Lucene 54.9 µs, 1.98x faster ; AND of 2–4 terms (300): lucene-rs 109.8 µs, Lucene 165.0 µs, 1.50x faster ; OR of 2–4 terms (301): lucene-rs 122.7 µs, Lucene 203.5 µs, 1.66x faster ; exact phrase (300): lucene-rs 369.9 µs, Lucene 728.3 µs, 1.97x faster ; open index: lucene-rs 2.2 ms, Lucene 378 ms, 169x faster ; first pass over 901 queries (cold): lucene-rs 106 ms, Lucene 672 ms, 6.4x faster</desc>
+<style>text{fill:#e6edf3;font-variant-numeric:tabular-nums} .m{fill:#9198a1}</style>
+<text x="28" y="40" font-size="20" font-weight="600">lucene-rs vs Apache Lucene 10.5.2</text>
+<text class="m" x="28" y="64" font-size="13">469k Wikipedia articles · Single thread · Bars scaled per row; shorter is faster</text>
+<rect x="28" y="80" width="12" height="12" rx="2" fill="#f07a45"/>
+<text x="46" y="90.5" font-size="12.5">lucene-rs</text>
+<rect x="134.60000000000002" y="80" width="12" height="12" rx="2" fill="#555e69"/>
+<text x="152.60000000000002" y="90.5" font-size="12.5">Lucene 10.5.2 (JDK 21)</text>
+<text class="m" x="832" y="90.5" font-size="12.5" text-anchor="end">speedup</text>
+<text x="28" y="128.0" font-size="13.5">single term (300)</text>
+<rect x="264" y="108" width="200.9" height="13" rx="2" fill="#f07a45"/>
+<text x="472.9" y="118.5" font-size="12">27.7 µs</text>
+<rect x="264" y="126" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="136.5" font-size="12">54.9 µs</text>
+<text x="832" y="129.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">1.98x</text>
+<text x="28" y="182.0" font-size="13.5">AND of 2–4 terms (300)</text>
+<rect x="264" y="162" width="264.8" height="13" rx="2" fill="#f07a45"/>
+<text x="536.8" y="172.5" font-size="12">109.8 µs</text>
+<rect x="264" y="180" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="190.5" font-size="12">165.0 µs</text>
+<text x="832" y="183.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">1.50x</text>
+<text x="28" y="236.0" font-size="13.5">OR of 2–4 terms (301)</text>
+<rect x="264" y="216" width="240.0" height="13" rx="2" fill="#f07a45"/>
+<text x="512.0" y="226.5" font-size="12">122.7 µs</text>
+<rect x="264" y="234" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="244.5" font-size="12">203.5 µs</text>
+<text x="832" y="237.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">1.66x</text>
+<text x="28" y="290.0" font-size="13.5">exact phrase (300)</text>
+<rect x="264" y="270" width="202.2" height="13" rx="2" fill="#f07a45"/>
+<text x="474.2" y="280.5" font-size="12">369.9 µs</text>
+<rect x="264" y="288" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="298.5" font-size="12">728.3 µs</text>
+<text x="832" y="291.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">1.97x</text>
+<line x1="28" x2="832" y1="332" y2="332" stroke="#3d444d"/>
+<text x="28" y="366.0" font-size="13.5">open index</text>
+<rect x="264" y="346" width="2.4" height="13" rx="2" fill="#f07a45"/>
+<text x="274.4" y="356.5" font-size="12">2.2 ms</text>
+<rect x="264" y="364" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="374.5" font-size="12">378 ms</text>
+<text x="832" y="367.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">169x</text>
+<text x="28" y="420.0" font-size="13.5">first pass over 901 queries (cold)</text>
+<rect x="264" y="400" width="62.6" height="13" rx="2" fill="#f07a45"/>
+<text x="334.6" y="410.5" font-size="12">106 ms</text>
+<rect x="264" y="418" width="398.0" height="13" rx="2" fill="#555e69"/>
+<text class="m" x="670.0" y="428.5" font-size="12">672 ms</text>
+<text x="832" y="421.0" font-size="17" font-weight="600" text-anchor="end" style="fill:#f07a45">6.4x</text>
+<text class="m" x="28" y="472" font-size="11.5">Recorded results · 3 rounds · 30 timed passes (phrases: 20) · Xeon @ 2.6 GHz · Methodology: bench/README.md</text>
+</svg>

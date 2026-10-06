@@ -4,6 +4,8 @@
 [![crates.io](https://img.shields.io/crates/v/lucene-rs.svg)](https://crates.io/crates/lucene-rs)
 [![docs.rs](https://img.shields.io/docsrs/lucene-rs)](https://docs.rs/lucene-rs)
 
+**Lucene's search core. Native Rust.**
+
 A Rust port of the core of [Apache Lucene](https://lucene.apache.org/) 10.5: the Lucene104
 postings format, BM25 scoring, Lucene's block-max top-k algorithms, segment-based indexing
 with deletes and merges, analyzers and the classic query parser.
@@ -16,6 +18,13 @@ actually runs, check the answers are identical, then time both.
   float scores and identical hit counts.
 - **Faster.** 1.6x faster per query on term, AND and OR queries, 2x on phrase queries, and
   over 150x faster to open an index (no JVM warm-up).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pc-style/lucene-rs/main/docs/assets/bench-dark.svg">
+  <img alt="Recorded benchmark: lucene-rs is 1.50–1.98x faster on warm queries than Lucene 10.5.2. Full latency table below." src="https://raw.githubusercontent.com/pc-style/lucene-rs/main/docs/assets/bench-light.svg" width="860">
+</picture>
+
+[Get started](#quick-start) · [Benchmarks](#performance) · [API docs](https://docs.rs/lucene-rs) · [Scope](#what-is-ported)
 
 ## Quick start
 
@@ -116,18 +125,21 @@ block index instead of BlockTree/FST.
 
 ## Performance
 
-Single-threaded mean latency per query (median of 30 timed runs per query after warm-up),
+Recorded single-threaded mean latency per query (per-query median across three rounds;
+30 timed passes for term/AND/OR, 20 for phrases, after warm-up),
 469k English Wikipedia articles, 8-vCPU Xeon @ 2.6 GHz. Lucene 10.5.2 on JDK 21 with the
 Panama vector module enabled.
 
+<!-- bench:summary:start -->
 | queries | lucene-rs | Lucene | speedup |
 |---|---:|---:|---:|
 | single term (300) | 27.7 µs | 54.9 µs | 1.98x |
 | AND of 2–4 terms (300) | 109.8 µs | 165.0 µs | 1.50x |
 | OR of 2–4 terms (301) | 122.7 µs | 203.5 µs | 1.66x |
 | exact phrase (300) | 369.9 µs | 728.3 µs | 1.97x |
-| open index | 2.2 ms | 378 ms | |
-| first pass over 901 queries (cold) | 106 ms | 672 ms | 6.3x |
+| open index | 2.2 ms | 378 ms | 169x |
+| first pass over 901 queries (cold) | 106 ms | 672 ms | 6.4x |
+<!-- bench:summary:end -->
 
 Methodology, percentiles and the JVM experiments (GC choice, JDK 25, vector API on and off)
 are in [`bench/README.md`](bench/README.md).
@@ -156,6 +168,10 @@ bench/scripts/run-all.sh   # full Lucene comparison (downloads ~1 GB, needs JDK 
 ```
 
 `src/codec/forutil_gen.rs` is generated: `python3 scripts/gen_forutil.py > src/codec/forutil_gen.rs`.
+
+Benchmark charts and tables are generated from the recorded [summary](bench/results/summary.json):
+`python3 bench/scripts/render.py`. CI checks that they stay in sync. See
+[release instructions](docs/releases.md) for the manual-only publishing workflow.
 
 ## License
 
