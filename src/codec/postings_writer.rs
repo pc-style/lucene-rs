@@ -2,8 +2,8 @@
 //! 256-doc FOR/bitset doc blocks + PFOR freq blocks, level-0 skip data (with impacts) before
 //! every packed block and level-1 skip data (with impacts) before every 32 blocks.
 
-use crate::forutil::{self, BLOCK_SIZE, bits_required};
-use crate::store::Out;
+use crate::codec::forutil::{self, BLOCK_SIZE, bits_required};
+use crate::codec::store::Out;
 
 pub const LEVEL1_FACTOR: usize = 32;
 pub const LEVEL1_NUM_DOCS: usize = LEVEL1_FACTOR * BLOCK_SIZE;

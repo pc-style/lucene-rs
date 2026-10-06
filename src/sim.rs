@@ -67,8 +67,24 @@ impl Bm25 {
 
     #[inline(always)]
     pub fn score(&self, freq: f32, norm: u8) -> f32 {
-        let norm_inverse = self.cache[norm as usize];
-        self.weight - self.weight / (1f32 + freq * norm_inverse)
+        self.score_x(freq * self.cache[norm as usize])
+    }
+
+    pub fn norm_inverses(&self) -> &[f32; 256] {
+        &self.cache
+    }
+
+    /// `1 / (k1 * (1 - b + b * dl / avgdl))` for an encoded norm.
+    #[inline(always)]
+    pub fn norm_inverse(&self, norm: u8) -> f32 {
+        self.cache[norm as usize]
+    }
+
+    /// Score for `x = freq * norm_inverse(norm)`. Each IEEE op here is monotonic, so the max
+    /// score over a set of (freq, norm) pairs equals `score_x` of their max `x`, bit for bit.
+    #[inline(always)]
+    pub fn score_x(&self, x: f32) -> f32 {
+        self.weight - self.weight / (1f32 + x)
     }
 }
 

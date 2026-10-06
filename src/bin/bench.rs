@@ -4,7 +4,7 @@
 //!   bench <index> <queries.tsv> bench <warmup> <iters>  latency benchmark (JSON on stdout)
 //!   bench <index> <queries.tsv> filter <out.tsv>        keep queries whose terms all exist, deduped
 use lucene_rs::index::Index;
-use lucene_rs::postings_reader::{NO_MORE_DOCS, PostingsEnum};
+use lucene_rs::codec::postings_reader::{NO_MORE_DOCS, PostingsEnum};
 use lucene_rs::search::{Kind, TermScorer, search};
 use lucene_rs::sim::Bm25;
 use std::collections::HashMap;

@@ -3,7 +3,9 @@
 //! BlockMaxConjunctionBulkScorer and TopScoreDocCollector.
 
 use crate::index::Index;
-use crate::postings_reader::{DocAndFreqBuffer, FreqNormBuffer, NO_MORE_DOCS, PostingsEnum};
+use crate::codec::postings_reader::{DocAndFreqBuffer, NO_MORE_DOCS, PostingsEnum};
+use crate::codec::forutil::BLOCK_SIZE;
+use crate::pool::{Pooled, recyclable};
 use crate::sim::Bm25;
 
 // ------------------------------------------------------------------------------------------
@@ -48,6 +50,8 @@ fn next_up(f: f32) -> f32 {
     }
 }
 
+#[cfg_attr(feature = "profile", inline(never))]
+
 fn min_required_score(max_remaining: f64, min_competitive: f32, num_scorers: usize) -> f64 {
     let mut m = min_competitive as f64 - max_remaining;
     let sub = ulp(min_competitive) as f64;
@@ -78,6 +82,8 @@ impl DocAndScoreAccBuffer {
         self.size = b.size;
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn filter_competitive_hits(&mut self, max_remaining: f64, min_competitive: f32, n: usize) {
         let min_req = min_required_score(max_remaining, min_competitive, n);
         if min_req <= 0.0 {
@@ -93,6 +99,8 @@ impl DocAndScoreAccBuffer {
         }
         self.size = k;
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn apply_required_clause(&mut self, s: &mut TermScorer) {
         let mut k = 0;
@@ -110,6 +118,8 @@ impl DocAndScoreAccBuffer {
         }
         self.size = k;
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn apply_optional_clause(&mut self, s: &mut TermScorer) {
         let mut cur = s.doc_id();
@@ -170,7 +180,9 @@ impl TopScoreDocCollector {
         }
     }
 
-    #[inline]
+    #[cfg_attr(feature = "profile", inline(never))]
+
+    #[cfg_attr(not(feature = "profile"), inline)]
     pub fn collect(&mut self, doc: i32, score: f32) {
         self.total_hits += 1;
         if score <= self.top_score {
@@ -233,7 +245,6 @@ struct MaxScoreCache {
     global_max_score: f32,
     cache: [f32; 2],
     cache_up_to: [i32; 2],
-    impacts: FreqNormBuffer,
 }
 
 struct ImpactsDisi {
@@ -261,7 +272,6 @@ impl<'a> TermScorer<'a> {
                 global_max_score,
                 cache: [0.0; 2],
                 cache_up_to: [-1; 2],
-                impacts: FreqNormBuffer { freqs: Vec::new(), norms: Vec::new() },
             },
             disi: top_level.then_some(ImpactsDisi {
                 min_competitive_score: 0.0,
@@ -281,7 +291,9 @@ impl<'a> TermScorer<'a> {
         self.pe.cost()
     }
 
-    #[inline]
+    #[cfg_attr(feature = "profile", inline(never))]
+
+    #[cfg_attr(not(feature = "profile"), inline)]
     pub fn score(&mut self) -> f32 {
         let doc = self.pe.doc_id();
         let freq = self.pe.freq();
@@ -294,19 +306,19 @@ impl<'a> TermScorer<'a> {
         self.pe.doc_id_up_to(0)
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn max_score_for_level(&mut self, level: usize) -> f32 {
         let up_to = self.pe.doc_id_up_to(level);
         if self.msc.cache_up_to[level] < up_to {
-            self.pe.impacts(level, &mut self.msc.impacts);
-            let mut max = 0f32;
-            for (&f, &n) in self.msc.impacts.freqs.iter().zip(self.msc.impacts.norms.iter()) {
-                max = max.max(self.sim.score(f as f32, n));
-            }
-            self.msc.cache[level] = max;
+            let x = self.pe.max_impact_x(level, self.sim.norm_inverses());
+            self.msc.cache[level] = self.sim.score_x(x);
             self.msc.cache_up_to[level] = up_to;
         }
         self.msc.cache[level]
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     pub fn get_max_score(&mut self, up_to: i32) -> f32 {
         for level in 0..self.pe.num_levels() {
@@ -338,6 +350,8 @@ impl<'a> TermScorer<'a> {
             }
         }
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn advance_target(&mut self, mut target: i32) -> i32 {
         let d = self.disi.as_ref().unwrap();
@@ -381,6 +395,8 @@ impl<'a> TermScorer<'a> {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     pub fn next_docs_and_scores(&mut self, up_to: i32, buffer: &mut DocAndFreqBuffer) {
         if self.disi.is_some() {
             // ImpactsDISI#ensureCompetitive
@@ -391,9 +407,18 @@ impl<'a> TermScorer<'a> {
             }
         }
         self.pe.next_postings(up_to, buffer);
-        for i in 0..buffer.size {
-            let norm = self.norms[buffer.docs[i] as usize];
-            buffer.features[i] = self.sim.score(buffer.features[i], norm);
+        // Two passes like BM25Similarity's BulkSimScorer: gather norm inverses, then a pure
+        // arithmetic loop that vectorizes. Clamping (a no-op on valid indexes) avoids a
+        // bounds-check branch while staying safe on corrupt input.
+        let last = self.norms.len() - 1;
+        let n = buffer.size;
+        let mut ni = [0f32; BLOCK_SIZE + 1];
+        let cache = self.sim.norm_inverses();
+        for (x, &d) in ni[..n].iter_mut().zip(&buffer.docs[..n]) {
+            *x = cache[self.norms[(d as u32 as usize).min(last)] as usize];
+        }
+        for (f, &x) in buffer.features[..n].iter_mut().zip(&ni[..n]) {
+            *f = self.sim.score_x(*f * x);
         }
     }
 }
@@ -401,8 +426,10 @@ impl<'a> TermScorer<'a> {
 // ------------------------------------------------------------------------------------------
 // BatchScoreBulkScorer (single term query)
 
+#[cfg_attr(feature = "profile", inline(never))]
+
 pub fn score_term(scorer: &mut TermScorer, c: &mut TopScoreDocCollector) {
-    let mut buffer = DocAndFreqBuffer::default();
+    let mut buffer: Pooled<DocAndFreqBuffer> = Pooled::take();
     scorer.set_min_competitive_score(c.min_competitive_score);
     if scorer.doc_id() < 0 {
         scorer.advance(0);
@@ -433,6 +460,30 @@ struct Wrapper {
     max_window_score: f32,
 }
 
+/// MaxScoreBulkScorer's window state. Invariant between uses: `window_matches` and
+/// `window_scores` are all zero (the flush step restores this).
+struct WindowScratch {
+    window_matches: Vec<u64>,
+    window_scores: Vec<f64>,
+    acc: DocAndScoreAccBuffer,
+}
+
+impl Default for WindowScratch {
+    fn default() -> Self {
+        WindowScratch {
+            window_matches: vec![0; INNER_WINDOW_SIZE as usize / 64],
+            window_scores: vec![0.0; INNER_WINDOW_SIZE as usize],
+            acc: DocAndScoreAccBuffer {
+                docs: vec![0; INNER_WINDOW_SIZE as usize],
+                scores: vec![0.0; INNER_WINDOW_SIZE as usize],
+                size: 0,
+            },
+        }
+    }
+}
+recyclable!(WindowScratch);
+recyclable!(DocAndScoreAccBuffer);
+
 pub struct MaxScoreBulkScorer<'a> {
     scorers: Vec<TermScorer<'a>>,
     w: Vec<Wrapper>,
@@ -443,10 +494,8 @@ pub struct MaxScoreBulkScorer<'a> {
     first_required: usize,
     next_min_competitive_score: f32,
     max_score_sums: Vec<f64>,
-    window_matches: Vec<u64>,
-    window_scores: Vec<f64>,
-    buf: DocAndFreqBuffer,
-    acc: DocAndScoreAccBuffer,
+    w2: Pooled<WindowScratch>,
+    buf: Pooled<DocAndFreqBuffer>,
     num_outer_windows: i32,
     num_candidates: i32,
     min_window_size: i32,
@@ -466,14 +515,8 @@ impl<'a> MaxScoreBulkScorer<'a> {
             first_required: n,
             next_min_competitive_score: 0.0,
             max_score_sums: vec![0.0; n],
-            window_matches: vec![0; INNER_WINDOW_SIZE as usize / 64],
-            window_scores: vec![0.0; INNER_WINDOW_SIZE as usize],
-            buf: DocAndFreqBuffer::default(),
-            acc: DocAndScoreAccBuffer {
-                docs: vec![0; INNER_WINDOW_SIZE as usize],
-                scores: vec![0.0; INNER_WINDOW_SIZE as usize],
-                size: 0,
-            },
+            w2: Pooled::take(),
+            buf: Pooled::take(),
             num_outer_windows: 0,
             num_candidates: 0,
             min_window_size: 1,
@@ -577,6 +620,8 @@ impl<'a> MaxScoreBulkScorer<'a> {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn score_inner_window_single_essential_clause(&mut self, c: &mut TopScoreDocCollector, up_to: i32) {
         let top = self.top();
         loop {
@@ -584,12 +629,14 @@ impl<'a> MaxScoreBulkScorer<'a> {
             if self.buf.size == 0 {
                 break;
             }
-            self.acc.copy_from(&self.buf);
+            self.w2.acc.copy_from(&self.buf);
             self.score_non_essential_clauses(c);
         }
         self.w[top].doc = self.scorers[top].doc_id();
         self.update_top();
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn score_inner_window_multiple_essential_clauses(&mut self, c: &mut TopScoreDocCollector, max: i32) {
         let mut top = self.top();
@@ -605,8 +652,8 @@ impl<'a> MaxScoreBulkScorer<'a> {
                 }
                 for idx in 0..self.buf.size {
                     let i = (self.buf.docs[idx] - inner_min) as usize;
-                    self.window_matches[i >> 6] |= 1u64 << (i & 63);
-                    self.window_scores[i] += self.buf.features[idx] as f64;
+                    self.w2.window_matches[i >> 6] |= 1u64 << (i & 63);
+                    self.w2.window_scores[i] += self.buf.features[idx] as f64;
                 }
             }
             self.w[top].doc = self.scorers[top].doc_id();
@@ -618,20 +665,22 @@ impl<'a> MaxScoreBulkScorer<'a> {
         // flushWindowToDocAndScoreAccBuffer
         let mut k = 0;
         for wi in 0..inner_size.div_ceil(64) {
-            let mut word = self.window_matches[wi];
+            let mut word = self.w2.window_matches[wi];
             while word != 0 {
                 let i = (wi << 6) + word.trailing_zeros() as usize;
-                self.acc.docs[k] = inner_min + i as i32;
-                self.acc.scores[k] = self.window_scores[i];
-                self.window_scores[i] = 0.0;
+                self.w2.acc.docs[k] = inner_min + i as i32;
+                self.w2.acc.scores[k] = self.w2.window_scores[i];
+                self.w2.window_scores[i] = 0.0;
                 k += 1;
                 word &= word - 1;
             }
-            self.window_matches[wi] = 0;
+            self.w2.window_matches[wi] = 0;
         }
-        self.acc.size = k;
+        self.w2.acc.size = k;
         self.score_non_essential_clauses(c);
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn compute_outer_window_max(&mut self, window_min: i32) -> i32 {
         let n = self.all.len();
@@ -656,6 +705,8 @@ impl<'a> MaxScoreBulkScorer<'a> {
         window_max
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn update_max_window_scores(&mut self, window_min: i32, window_max: i32) {
         for s in 0..self.scorers.len() {
             if self.w[s].doc < window_max {
@@ -669,23 +720,27 @@ impl<'a> MaxScoreBulkScorer<'a> {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn score_non_essential_clauses(&mut self, c: &mut TopScoreDocCollector) {
-        self.num_candidates = self.num_candidates.wrapping_add(self.acc.size as i32);
+        self.num_candidates = self.num_candidates.wrapping_add(self.w2.acc.size as i32);
         let n = self.all.len();
         for i in (0..self.first_essential).rev() {
             let s = self.all[i];
-            self.acc.filter_competitive_hits(self.max_score_sums[i], c.min_competitive_score, n);
+            self.w2.acc.filter_competitive_hits(self.max_score_sums[i], c.min_competitive_score, n);
             if i >= self.first_required {
-                self.acc.apply_required_clause(&mut self.scorers[s]);
+                self.w2.acc.apply_required_clause(&mut self.scorers[s]);
             } else {
-                self.acc.apply_optional_clause(&mut self.scorers[s]);
+                self.w2.acc.apply_optional_clause(&mut self.scorers[s]);
             }
             self.w[s].doc = self.scorers[s].doc_id();
         }
-        for i in 0..self.acc.size {
-            c.collect(self.acc.docs[i], self.acc.scores[i] as f32);
+        for i in 0..self.w2.acc.size {
+            c.collect(self.w2.acc.docs[i], self.w2.acc.scores[i] as f32);
         }
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn partition_scorers(&mut self, min_competitive: f32) -> bool {
         let n = self.all.len();
@@ -748,8 +803,8 @@ const MAX_WINDOW_SIZE: i32 = 65536;
 pub struct BlockMaxConjunctionBulkScorer<'a> {
     scorers: Vec<TermScorer<'a>>,
     sum_of_other_clauses: Vec<f64>,
-    buf: DocAndFreqBuffer,
-    acc: DocAndScoreAccBuffer,
+    buf: Pooled<DocAndFreqBuffer>,
+    acc: Pooled<DocAndScoreAccBuffer>,
 }
 
 impl<'a> BlockMaxConjunctionBulkScorer<'a> {
@@ -760,8 +815,8 @@ impl<'a> BlockMaxConjunctionBulkScorer<'a> {
         Self {
             scorers,
             sum_of_other_clauses: vec![f64::INFINITY; n],
-            buf: DocAndFreqBuffer::default(),
-            acc: DocAndScoreAccBuffer::default(),
+            buf: Pooled::take(),
+            acc: Pooled::take(),
         }
     }
 
@@ -795,6 +850,8 @@ impl<'a> BlockMaxConjunctionBulkScorer<'a> {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn score_doc_first_until_dynamic_pruning(&mut self, c: &mut TopScoreDocCollector, min: i32, max: i32) -> i32 {
         let mut doc = self.scorers[0].doc_id();
         if doc < min {
@@ -823,6 +880,8 @@ impl<'a> BlockMaxConjunctionBulkScorer<'a> {
         }
         doc
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn score_window_score_first(&mut self, c: &mut TopScoreDocCollector, min: i32, max: i32, max_window_score: f32) {
         if max_window_score < c.min_competitive_score {

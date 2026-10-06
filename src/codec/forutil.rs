@@ -1,7 +1,7 @@
 //! Port of Lucene104 ForUtil / PForUtil: 256 integers per block, bit-packed with the same
 //! SWAR "collapse into 8/16/32-bit lanes" layout Lucene uses so decoding auto-vectorizes.
 
-use crate::store::{In, Out};
+use crate::codec::store::{In, Out};
 
 pub const BLOCK_SIZE: usize = 256;
 const MAX_EXCEPTIONS: usize = 7;
@@ -43,6 +43,7 @@ fn collapse16(a: &mut [u32; BLOCK_SIZE]) {
         a[i] = (a[i] << 16) | a[128 + i];
     }
 }
+#[cfg(test)]
 #[inline(always)]
 fn expand8(a: &mut [u32; BLOCK_SIZE]) {
     for i in 0..64 {
@@ -53,6 +54,7 @@ fn expand8(a: &mut [u32; BLOCK_SIZE]) {
         a[192 + i] = l & 0xFF;
     }
 }
+#[cfg(test)]
 #[inline(always)]
 fn expand16(a: &mut [u32; BLOCK_SIZE]) {
     for i in 0..128 {
@@ -123,6 +125,7 @@ pub fn encode(ints: &mut [u32; BLOCK_SIZE], bpv: u32, out: &mut Out) {
 }
 
 /// Inverse of [`encode`], specialized per bit width like Lucene's generated decodeN methods.
+#[cfg(test)]
 #[inline(always)]
 fn decode_impl<const B: u32>(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     let p: u32 = if B <= 8 {
@@ -184,6 +187,7 @@ fn decode_impl<const B: u32>(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     }
 }
 
+#[cfg(test)]
 macro_rules! dispatch {
     ($bpv:expr, $input:expr, $ints:expr, [$($n:literal)*]) => {
         match $bpv {
@@ -193,7 +197,18 @@ macro_rules! dispatch {
     };
 }
 
+/// Decode 256 values of `bpv` bits (generated straight-line decoders, see scripts/gen_forutil.py).
+#[inline]
 pub fn decode(bpv: u32, input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
+    let n = num_bytes(bpv);
+    super::forutil_gen::decode(bpv, &input.data[input.pos..input.pos + n], ints);
+    input.pos += n;
+}
+
+/// Reference decoder that inverts `encode` with a generic bit-stream loop. Used to test the
+/// generated decoders.
+#[cfg(test)]
+fn decode_reference(bpv: u32, input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     dispatch!(bpv, input, ints, [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32]);
 }
 
@@ -246,6 +261,7 @@ pub fn pfor_encode(ints: &mut [u32; BLOCK_SIZE], out: &mut Out) {
 }
 
 /// PForUtil#decode
+#[cfg_attr(feature = "profile", inline(never))]
 pub fn pfor_decode(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
     let token = input.read_byte() as u32;
     let bpv = token & 0x1F;
@@ -261,6 +277,7 @@ pub fn pfor_decode(input: &mut In, ints: &mut [u32; BLOCK_SIZE]) {
 }
 
 /// PForUtil#skip
+#[cfg_attr(feature = "profile", inline(never))]
 pub fn pfor_skip(input: &mut In) {
     let token = input.read_byte() as u32;
     let bpv = token & 0x1F;
@@ -298,11 +315,13 @@ mod tests {
                 let mut out = Out::new();
                 encode(&mut enc, bpv, &mut out);
                 assert_eq!(out.len(), num_bytes(bpv));
-                let mut dec = [0u32; BLOCK_SIZE];
-                let mut input = In::new(&out.buf, 0);
-                decode(bpv, &mut input, &mut dec);
-                assert_eq!(dec, vals, "bpv {bpv}");
-                assert_eq!(input.pos, out.len());
+                for f in [decode, decode_reference] {
+                    let mut dec = [0u32; BLOCK_SIZE];
+                    let mut input = In::new(&out.buf, 0);
+                    f(bpv, &mut input, &mut dec);
+                    assert_eq!(dec, vals, "bpv {bpv}");
+                    assert_eq!(input.pos, out.len());
+                }
             }
         }
     }

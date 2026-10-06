@@ -1,9 +1,9 @@
 //! Single-segment, single-field index: in-memory inversion, then one pass writing
 //! postings (Lucene104 layout), a block-based term dictionary, and one norm byte per doc.
 
-use crate::postings_writer::{PostingsWriter, TermMeta};
+use crate::codec::postings_writer::{PostingsWriter, TermMeta};
 use crate::sim::int_to_byte4;
-use crate::store::{In, Out};
+use crate::codec::store::{In, Out};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use std::fs::{self, File};

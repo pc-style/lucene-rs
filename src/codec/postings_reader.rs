@@ -1,9 +1,10 @@
 //! Port of Lucene104PostingsReader.BlockPostingsEnum for the configuration used by top-k
 //! scoring queries: needsFreq = true, needsImpacts = true, no positions.
 
-use crate::forutil::{self, BLOCK_SIZE};
-use crate::postings_writer::{LEVEL1_NUM_DOCS, TermMeta};
-use crate::store::In;
+use crate::codec::forutil::{self, BLOCK_SIZE};
+use crate::codec::postings_writer::{LEVEL1_NUM_DOCS, TermMeta};
+use crate::codec::store::In;
+use crate::pool::{Pooled, recyclable};
 
 pub const NO_MORE_DOCS: i32 = i32::MAX;
 const LEVEL1: i32 = LEVEL1_NUM_DOCS as i32;
@@ -34,14 +35,34 @@ pub struct FreqNormBuffer {
     pub norms: Vec<u8>,
 }
 
-pub struct PostingsEnum<'a> {
-    data: &'a [u8],
-    pos: usize,
+/// Per-enum block buffers. Every element is written before it is read, so recycled buffers
+/// need no clearing.
+struct Buffers {
     doc_buffer: [i32; BLOCK_SIZE + 1],
     freq_buffer: [u32; BLOCK_SIZE],
     scratch: [u32; BLOCK_SIZE],
     doc_bitset: [u64; BLOCK_SIZE / 2],
     doc_cumulative_word_pop_counts: [i32; BLOCK_SIZE / 2],
+}
+
+impl Default for Buffers {
+    fn default() -> Self {
+        Buffers {
+            doc_buffer: [0; BLOCK_SIZE + 1],
+            freq_buffer: [0; BLOCK_SIZE],
+            scratch: [0; BLOCK_SIZE],
+            doc_bitset: [0; BLOCK_SIZE / 2],
+            doc_cumulative_word_pop_counts: [0; BLOCK_SIZE / 2],
+        }
+    }
+}
+recyclable!(Buffers);
+recyclable!(DocAndFreqBuffer);
+
+pub struct PostingsEnum<'a> {
+    data: &'a [u8],
+    pos: usize,
+    b: Pooled<Buffers>,
     doc_bitset_base: i32,
     encoding: Encoding,
 
@@ -74,11 +95,7 @@ impl<'a> PostingsEnum<'a> {
         let mut e = Box::new(PostingsEnum {
             data,
             pos: 0,
-            doc_buffer: [0; BLOCK_SIZE + 1],
-            freq_buffer: [0; BLOCK_SIZE],
-            scratch: [0; BLOCK_SIZE],
-            doc_bitset: [0; BLOCK_SIZE / 2],
-            doc_cumulative_word_pop_counts: [0; BLOCK_SIZE / 2],
+            b: Pooled::take(),
             doc_bitset_base: 0,
             encoding: Encoding::Packed,
             doc: -1,
@@ -126,87 +143,85 @@ impl<'a> PostingsEnum<'a> {
         self.doc_freq as i64
     }
 
-    #[inline]
+    #[cfg_attr(feature = "profile", inline(never))]
+
+    #[cfg_attr(not(feature = "profile"), inline)]
     pub fn freq(&mut self) -> u32 {
         if self.freq_fp != NO_FREQ_FP {
             let mut input = In::new(self.data, self.freq_fp);
-            forutil::pfor_decode(&mut input, &mut self.freq_buffer);
+            forutil::pfor_decode(&mut input, &mut self.b.freq_buffer);
             self.pos = input.pos;
             self.freq_fp = NO_FREQ_FP;
         }
-        self.freq_buffer[self.doc_buffer_upto - 1]
+        self.b.freq_buffer[self.doc_buffer_upto - 1]
     }
 
     fn refill_full_block(&mut self) {
         let mut input = self.input();
         let bpv = input.read_byte() as i8;
         if bpv > 0 {
-            forutil::decode(bpv as u32, &mut input, &mut self.scratch);
-            // prefixSum(docBuffer, BLOCK_SIZE, prevDocID)
-            let mut acc = self.prev_doc_id;
-            for i in 0..BLOCK_SIZE {
-                acc = acc.wrapping_add(self.scratch[i] as i32);
-                self.doc_buffer[i] = acc;
-            }
+            forutil::decode(bpv as u32, &mut input, &mut self.b.scratch);
+            let b = &mut *self.b;
+            prefix_sum(&b.scratch, &mut b.doc_buffer, self.prev_doc_id);
             self.encoding = Encoding::Packed;
         } else {
             self.doc_bitset_base = self.prev_doc_id + 1;
             let num_longs = if bpv == 0 {
-                self.doc_bitset[..BLOCK_SIZE / 64].fill(u64::MAX);
+                self.b.doc_bitset[..BLOCK_SIZE / 64].fill(u64::MAX);
                 BLOCK_SIZE / 64
             } else {
                 let n = (-(bpv as i32)) as usize;
                 for i in 0..n {
-                    self.doc_bitset[i] = input.read_long();
+                    self.b.doc_bitset[i] = input.read_long();
                 }
                 n
             };
             let mut acc = 0;
             for i in 0..num_longs - 1 {
-                acc += self.doc_bitset[i].count_ones() as i32;
-                self.doc_cumulative_word_pop_counts[i] = acc;
+                acc += self.b.doc_bitset[i].count_ones() as i32;
+                self.b.doc_cumulative_word_pop_counts[i] = acc;
             }
-            self.doc_cumulative_word_pop_counts[num_longs - 1] = BLOCK;
+            self.b.doc_cumulative_word_pop_counts[num_longs - 1] = BLOCK;
             self.encoding = Encoding::Unary;
         }
         self.freq_fp = input.pos;
         forutil::pfor_skip(&mut input);
         self.pos = input.pos;
         self.doc_count_left -= BLOCK;
-        self.prev_doc_id = self.doc_buffer[BLOCK_SIZE - 1];
+        self.prev_doc_id = self.b.doc_buffer[BLOCK_SIZE - 1];
         self.doc_buffer_upto = 0;
     }
 
     fn refill_remainder(&mut self) {
         debug_assert!(self.doc_count_left >= 0 && self.doc_count_left < BLOCK);
         if self.doc_freq == 1 {
-            self.doc_buffer[0] = self.singleton_doc_id;
-            self.freq_buffer[0] = self.total_term_freq as u32;
-            self.doc_buffer[1] = NO_MORE_DOCS;
+            self.b.doc_buffer[0] = self.singleton_doc_id;
+            self.b.freq_buffer[0] = self.total_term_freq as u32;
+            self.b.doc_buffer[1] = NO_MORE_DOCS;
             self.doc_count_left = 0;
             self.doc_buffer_size = 1;
         } else {
             let n = self.doc_count_left as usize;
             let mut input = self.input();
             // PostingsUtil#readVIntBlock
-            input.read_group_vints(&mut self.doc_buffer, n);
+            input.read_group_vints(&mut self.b.doc_buffer, n);
             for i in 0..n {
-                let v = self.doc_buffer[i] as u32;
-                self.doc_buffer[i] = (v >> 1) as i32;
-                self.freq_buffer[i] = if v & 1 != 0 { 1 } else { input.read_vint() };
+                let v = self.b.doc_buffer[i] as u32;
+                self.b.doc_buffer[i] = (v >> 1) as i32;
+                self.b.freq_buffer[i] = if v & 1 != 0 { 1 } else { input.read_vint() };
             }
             self.pos = input.pos;
             let mut acc = self.prev_doc_id;
-            for d in self.doc_buffer[..n].iter_mut() {
+            for d in self.b.doc_buffer[..n].iter_mut() {
                 acc += *d;
                 *d = acc;
             }
-            self.doc_buffer[n] = NO_MORE_DOCS;
+            self.b.doc_buffer[n] = NO_MORE_DOCS;
             self.freq_fp = NO_FREQ_FP;
             self.doc_buffer_size = n;
             self.doc_count_left = 0;
         }
-        self.prev_doc_id = self.doc_buffer[BLOCK_SIZE - 1];
+        self.prev_doc_id = self.b.doc_buffer[BLOCK_SIZE - 1];
         self.doc_buffer_upto = 0;
         self.encoding = Encoding::Packed;
     }
@@ -219,6 +234,8 @@ impl<'a> PostingsEnum<'a> {
             self.refill_remainder();
         }
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn skip_level1_to(&mut self, target: i32) {
         loop {
@@ -248,6 +265,8 @@ impl<'a> PostingsEnum<'a> {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
+
     fn do_move_to_next_level0_block(&mut self) {
         if self.doc_count_left >= BLOCK {
             let mut input = self.input();
@@ -273,6 +292,8 @@ impl<'a> PostingsEnum<'a> {
         self.prev_doc_id = self.level0_last_doc_id;
         self.do_move_to_next_level0_block();
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     fn skip_level0_to(&mut self, target: i32) {
         loop {
@@ -322,21 +343,23 @@ impl<'a> PostingsEnum<'a> {
     #[inline]
     fn next_set_bit(&self, index: usize) -> i32 {
         let mut i = index >> 6;
-        let word = self.doc_bitset[i] >> (index & 63);
+        let word = self.b.doc_bitset[i] >> (index & 63);
         if word != 0 {
             return (index + word.trailing_zeros() as usize) as i32;
         }
         loop {
             i += 1;
-            if i >= self.doc_bitset.len() {
+            if i >= self.b.doc_bitset.len() {
                 return NO_MORE_DOCS;
             }
-            let w = self.doc_bitset[i];
+            let w = self.b.doc_bitset[i];
             if w != 0 {
                 return ((i << 6) + w.trailing_zeros() as usize) as i32;
             }
         }
     }
+
+    #[cfg_attr(feature = "profile", inline(never))]
 
     pub fn next_doc(&mut self) -> i32 {
         if self.doc == self.level0_last_doc_id || self.needs_refilling {
@@ -348,7 +371,7 @@ impl<'a> PostingsEnum<'a> {
             }
         }
         match self.encoding {
-            Encoding::Packed => self.doc = self.doc_buffer[self.doc_buffer_upto],
+            Encoding::Packed => self.doc = self.b.doc_buffer[self.doc_buffer_upto],
             Encoding::Unary => {
                 let next = self.next_set_bit((self.doc - self.doc_bitset_base + 1) as usize);
                 self.doc = self.doc_bitset_base + next;
@@ -369,16 +392,16 @@ impl<'a> PostingsEnum<'a> {
         match self.encoding {
             Encoding::Packed => {
                 let next =
-                    find_next_geq(&self.doc_buffer, target, self.doc_buffer_upto, self.doc_buffer_size);
-                self.doc = self.doc_buffer[next];
+                    find_next_geq(&self.b.doc_buffer, target, self.doc_buffer_upto, self.doc_buffer_size);
+                self.doc = self.b.doc_buffer[next];
                 self.doc_buffer_upto = next + 1;
             }
             Encoding::Unary => {
                 let next = self.next_set_bit((target - self.doc_bitset_base) as usize);
                 self.doc = self.doc_bitset_base + next;
                 let word_index = (next >> 6) as usize;
-                self.doc_buffer_upto = (1 + self.doc_cumulative_word_pop_counts[word_index]
-                    - (self.doc_bitset[word_index] >> (next & 63)).count_ones() as i32)
+                self.doc_buffer_upto = (1 + self.b.doc_cumulative_word_pop_counts[word_index]
+                    - (self.b.doc_bitset[word_index] >> (next & 63)).count_ones() as i32)
                     as usize;
             }
         }
@@ -387,15 +410,16 @@ impl<'a> PostingsEnum<'a> {
 
     #[inline]
     fn compute_buffer_end_boundary(&self, up_to: i32) -> usize {
-        if self.doc_buffer_size != 0 && self.doc_buffer[self.doc_buffer_size - 1] < up_to {
+        if self.doc_buffer_size != 0 && self.b.doc_buffer[self.doc_buffer_size - 1] < up_to {
             self.doc_buffer_size
         } else {
-            find_next_geq(&self.doc_buffer, up_to, self.doc_buffer_upto, self.doc_buffer_size)
+            find_next_geq(&self.b.doc_buffer, up_to, self.doc_buffer_upto, self.doc_buffer_size)
         }
     }
 
     /// Returns docs (and freqs as floats) of the current block that are < up_to, then advances
     /// to up_to.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn next_postings(&mut self, up_to: i32, buffer: &mut DocAndFreqBuffer) {
         debug_assert!(!self.needs_refilling);
         buffer.size = 0;
@@ -409,11 +433,11 @@ impl<'a> PostingsEnum<'a> {
             Encoding::Packed => {
                 let end = self.compute_buffer_end_boundary(up_to);
                 buffer.size = end - start;
-                buffer.docs[..buffer.size].copy_from_slice(&self.doc_buffer[start..end]);
+                buffer.docs[..buffer.size].copy_from_slice(&self.b.doc_buffer[start..end]);
             }
             Encoding::Unary => {
                 buffer.size = bitset_into_array(
-                    &self.doc_bitset,
+                    &self.b.doc_bitset,
                     (self.doc - self.doc_bitset_base) as usize,
                     (up_to - self.doc_bitset_base) as usize,
                     self.doc_bitset_base,
@@ -422,7 +446,7 @@ impl<'a> PostingsEnum<'a> {
             }
         }
         for i in 0..buffer.size {
-            buffer.features[i] = self.freq_buffer[start + i] as f32;
+            buffer.features[i] = self.b.freq_buffer[start + i] as f32;
         }
         self.advance(up_to);
     }
@@ -443,6 +467,34 @@ impl<'a> PostingsEnum<'a> {
         }
     }
 
+    /// Max of `freq * norm_inverse[norm]` over the impacts of `level` (see `Bm25::score_x`).
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn max_impact_x(&self, level: usize, norm_inverse: &[f32; 256]) -> f32 {
+        let (start, len) = if level == 0 && self.level0_last_doc_id != NO_MORE_DOCS {
+            self.level0_impacts
+        } else if level == 1 {
+            self.level1_impacts
+        } else {
+            return i32::MAX as f32 * norm_inverse[1];
+        };
+        let mut input = In::new(self.data, start);
+        let end = start + len;
+        let (mut freq, mut norm) = (0u32, 0i64);
+        let mut max = 0f32;
+        while input.pos < end {
+            let freq_delta = input.read_vint();
+            freq += 1 + (freq_delta >> 1);
+            if freq_delta & 1 != 0 {
+                norm += 1 + input.read_zlong();
+            } else {
+                norm += 1;
+            }
+            max = max.max(freq as f32 * norm_inverse[norm as u8 as usize]);
+        }
+        max
+    }
+
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn impacts(&self, level: usize, out: &mut FreqNormBuffer) {
         out.freqs.clear();
         out.norms.clear();
@@ -472,13 +524,68 @@ impl<'a> PostingsEnum<'a> {
     }
 }
 
-/// VectorUtil#findNextGEQ: first index in [from, to) with buffer[i] >= target, else `to`.
-/// Written in 8-wide chunks so LLVM emits a SIMD compare + movemask, like Lucene's Panama path.
+/// `dst[i] = base + src[0] + ... + src[i]` (Lucene104PostingsReader#prefixSum).
 #[inline]
+fn prefix_sum(src: &[u32; BLOCK_SIZE], dst: &mut [i32; BLOCK_SIZE + 1], base: i32) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // SAFETY: AVX2 is enabled at compile time; loads/stores stay within the 256-element arrays.
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut carry = _mm256_set1_epi32(base);
+        let last = _mm256_set1_epi32(7);
+        for c in 0..BLOCK_SIZE / 8 {
+            let mut x = _mm256_loadu_si256(src.as_ptr().add(c * 8) as *const __m256i);
+            x = _mm256_add_epi32(x, _mm256_slli_si256::<4>(x));
+            x = _mm256_add_epi32(x, _mm256_slli_si256::<8>(x));
+            // carry the low 128-bit lane's total into the high lane
+            let t = _mm256_shuffle_epi32::<0xFF>(x);
+            x = _mm256_add_epi32(x, _mm256_permute2x128_si256::<0x08>(t, t));
+            x = _mm256_add_epi32(x, carry);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(c * 8) as *mut __m256i, x);
+            carry = _mm256_permutevar8x32_epi32(x, last);
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        let mut acc = base;
+        for i in 0..BLOCK_SIZE {
+            acc = acc.wrapping_add(src[i] as i32);
+            dst[i] = acc;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_sum_matches_scalar() {
+        let mut src = [0u32; BLOCK_SIZE];
+        for (i, v) in src.iter_mut().enumerate() {
+            *v = (i as u32 * 2654435761) % 1000;
+        }
+        let mut dst = [0i32; BLOCK_SIZE + 1];
+        prefix_sum(&src, &mut dst, 12345);
+        let mut acc = 12345i32;
+        for i in 0..BLOCK_SIZE {
+            acc += src[i] as i32;
+            assert_eq!(dst[i], acc, "at {i}");
+        }
+    }
+}
+
+/// VectorUtil#findNextGEQ: first index in [from, to) with buffer[i] >= target, else `to`.
+/// Scans 16-wide chunks (a SIMD compare + movemask) for the next 64 entries, the common case,
+/// then falls back to a branchless binary search for far targets.
+#[cfg_attr(feature = "profile", inline(never))]
+#[cfg_attr(not(feature = "profile"), inline)]
 fn find_next_geq(buffer: &[i32], target: i32, from: usize, to: usize) -> usize {
+    const W: usize = 16;
     let mut i = from;
-    while i + 8 <= to {
-        let chunk: &[i32; 8] = buffer[i..i + 8].try_into().unwrap();
+    let scan_end = (from + 4 * W).min(to);
+    while i + W <= scan_end {
+        let chunk: &[i32; W] = buffer[i..i + W].try_into().unwrap();
         let mut m = 0u32;
         for (j, &v) in chunk.iter().enumerate() {
             m |= ((v >= target) as u32) << j;
@@ -486,18 +593,32 @@ fn find_next_geq(buffer: &[i32], target: i32, from: usize, to: usize) -> usize {
         if m != 0 {
             return i + m.trailing_zeros() as usize;
         }
-        i += 8;
+        i += W;
     }
-    while i < to {
-        if buffer[i] >= target {
-            return i;
+    if to - i <= W {
+        while i < to {
+            if buffer[i] >= target {
+                return i;
+            }
+            i += 1;
         }
-        i += 1;
+        return to;
     }
-    to
+    // lower bound in [i, to): everything before i is < target
+    let mut base = i;
+    let mut len = to - i;
+    while len > 1 {
+        let half = len / 2;
+        if buffer[base + half - 1] < target {
+            base += half;
+        }
+        len -= half;
+    }
+    if buffer[base] < target { base + 1 } else { base }
 }
 
 /// FixedBitSet#intoArray
+#[cfg_attr(feature = "profile", inline(never))]
 fn bitset_into_array(bits: &[u64], mut from: usize, to: usize, base: i32, out: &mut [i32]) -> usize {
     let mut n = 0;
     let mut emit = |mut word: u64, base: i32, n: &mut usize| {
