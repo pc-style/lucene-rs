@@ -17,8 +17,18 @@ pub enum Occur {
     Filter,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Query {
+    I64Range {
+        field: String,
+        lower: std::ops::Bound<i64>,
+        upper: std::ops::Bound<i64>,
+    },
+    F64Range {
+        field: String,
+        lower: std::ops::Bound<f64>,
+        upper: std::ops::Bound<f64>,
+    },
     /// Documents containing a term, scored with BM25.
     Term(Term),
     Boolean(BooleanQuery),
@@ -30,6 +40,48 @@ pub enum Query {
     ConstantScore(Box<Self>),
     MatchAll,
     MatchNone,
+}
+
+impl PartialEq for Query {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::F64Range {
+                    field: a,
+                    lower: al,
+                    upper: au,
+                },
+                Self::F64Range {
+                    field: b,
+                    lower: bl,
+                    upper: bu,
+                },
+            ) => {
+                a == b
+                    && al.map(f64::to_bits) == bl.map(f64::to_bits)
+                    && au.map(f64::to_bits) == bu.map(f64::to_bits)
+            }
+            (
+                Self::I64Range {
+                    field: a,
+                    lower: al,
+                    upper: au,
+                },
+                Self::I64Range {
+                    field: b,
+                    lower: bl,
+                    upper: bu,
+                },
+            ) => a == b && al == bl && au == bu,
+            (Self::Term(a), Self::Term(b)) => a == b,
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::Phrase(a), Self::Phrase(b)) => a == b,
+            (Self::Boost(a, ab), Self::Boost(b, bb)) => a == b && ab.to_bits() == bb.to_bits(),
+            (Self::ConstantScore(a), Self::ConstantScore(b)) => a == b,
+            (Self::MatchAll, Self::MatchAll) | (Self::MatchNone, Self::MatchNone) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Query {

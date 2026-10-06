@@ -213,6 +213,7 @@ impl IndexWriter {
     /// # Errors
     /// As for [`IndexWriter::add_document`].
     pub fn update_document(&mut self, term: Term, doc: &Document) -> Result<()> {
+        crate::index::buffer::validate(doc, &mut self.field_infos.clone())?;
         self.delete_documents(term);
         self.add_document(doc)
     }

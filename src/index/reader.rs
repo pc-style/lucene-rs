@@ -26,6 +26,7 @@ pub struct TermStats {
 /// An immutable view of one commit. Cheap to clone (segments are shared).
 #[derive(Clone)]
 pub struct DirectoryReader {
+    pub(crate) snapshot: Arc<()>,
     dir: PathBuf,
     generation: u64,
     segments: Vec<Arc<SegmentReader>>,
@@ -70,6 +71,7 @@ impl DirectoryReader {
             segments.push(r);
         }
         Ok(Self {
+            snapshot: Arc::new(()),
             dir,
             generation: infos.generation,
             segments,

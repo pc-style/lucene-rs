@@ -4,6 +4,7 @@
 mod buffer;
 mod codec_util;
 mod commit;
+pub mod doc_values;
 pub mod field_infos;
 pub mod live_docs;
 pub mod merge;

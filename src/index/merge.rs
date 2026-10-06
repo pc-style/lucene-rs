@@ -5,6 +5,7 @@ use crate::codec::postings_reader::NO_MORE_DOCS;
 use crate::codec::postings_writer::TermMeta;
 use crate::document::IndexOptions;
 use crate::error::{Error, Result};
+use crate::index::doc_values::Columns;
 use crate::index::field_infos::{FieldInfo, FieldInfos};
 use crate::index::segment::{SegmentInfo, SegmentReader};
 use crate::index::segment_writer::SegmentWriter;
@@ -253,6 +254,19 @@ pub(crate) fn merge_segments(
             }
         }
     }
+    let mut columns = Columns::new();
+    for info in infos.iter().filter(|f| f.doc_values.is_some()) {
+        let mut values = Vec::new();
+        for (reader, map) in readers.iter().zip(&maps) {
+            for (doc, new) in (0..reader.max_doc()).zip(map) {
+                if new.is_some() {
+                    values.push(reader.doc_value(&info.name, doc).cloned());
+                }
+            }
+        }
+        columns.insert(info.number, values);
+    }
+    w.set_doc_values(columns);
     w.set_stored(stored);
     Ok(Some(w.finish(dir)?))
 }

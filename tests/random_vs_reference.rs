@@ -103,6 +103,9 @@ impl Reference {
     /// Score of one query on one doc, `None` if it does not match.
     fn score(&self, q: &Query, d: &RefDoc, boost: f32) -> Option<f64> {
         match q {
+            // This reference corpus contains only text fields. Numeric fixtures live in
+            // numeric_search.rs and compare ranges against their original typed values.
+            Query::I64Range { .. } | Query::F64Range { .. } | Query::MatchNone => None,
             Query::Term(term) => {
                 let field = term.field.as_str();
                 let text = term.text().unwrap();
@@ -125,7 +128,6 @@ impl Reference {
             Query::Boost(inner, b) => self.score(inner, d, boost * b),
             Query::ConstantScore(inner) => self.score(inner, d, 0.0).map(|_| f64::from(boost)),
             Query::MatchAll => Some(f64::from(boost)),
-            Query::MatchNone => None,
             Query::Phrase(p) => {
                 let toks = field_tokens(d, &p.field);
                 let mut freq = 0;

@@ -20,6 +20,7 @@ use crate::document::IndexOptions;
 use crate::error::{Error, Result};
 use crate::index::codec_util::{write_footer, write_header};
 use crate::index::commit::write_synced;
+use crate::index::doc_values::{self, Columns};
 use crate::index::field_infos::FieldInfos;
 use crate::index::segment::{
     DOC_CODEC, FieldStats, NRM_CODEC, POS_CODEC, SegmentInfo, TIM_CODEC, VERSION,
@@ -30,6 +31,7 @@ use std::path::Path;
 
 /// Writes a segment field by field, term by term, doc by doc (all in sorted order).
 pub struct SegmentWriter {
+    columns: Columns,
     name: String,
     max_doc: u32,
     fields: FieldInfos,
@@ -61,6 +63,7 @@ impl SegmentWriter {
         let mut nrm = Out::new();
         write_header(&mut nrm, NRM_CODEC, VERSION);
         Self {
+            columns: Columns::new(),
             name,
             max_doc,
             fields,
@@ -203,8 +206,13 @@ impl SegmentWriter {
         self.stored = Some(stored);
     }
 
+    pub fn set_doc_values(&mut self, columns: Columns) {
+        self.columns = columns;
+    }
+
     pub fn finish(self, dir: &Path) -> Result<SegmentInfo> {
         let Self {
+            columns,
             name,
             max_doc,
             fields,
@@ -231,6 +239,7 @@ impl SegmentWriter {
         };
         let (fdt, fdx) = stored.finish()?;
         let info = SegmentInfo {
+            format_version: 2,
             name,
             max_doc,
             fields,
@@ -245,6 +254,7 @@ impl SegmentWriter {
         write("nrm", &nrm.buf)?;
         write("fdt", &fdt)?;
         write("fdx", &fdx)?;
+        write("dvm", &doc_values::encode(&columns, max_doc)?)?;
         write("si", &info.encode()?)?; // last: a segment is complete once its .si exists
         Ok(info)
     }
