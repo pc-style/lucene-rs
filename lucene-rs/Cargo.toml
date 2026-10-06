@@ -1,0 +1,14 @@
+[package]
+name = "lucene-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memmap2 = "0.9.11"
+rustc-hash = "2.1.3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
