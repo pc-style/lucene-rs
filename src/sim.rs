@@ -144,6 +144,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn idf_matches_lucene_rounding() {
+        // Lucene 10.5.2 BM25Similarity.idfExplain with docFreq = docCount = 54_505.
+        // Math.log(1 + x) and log1p(x) round to different float bits for this input.
+        assert_eq!(idf(54_505, 54_505).to_bits(), 0x3719_e736);
+    }
+
+    #[test]
+    fn score_matches_lucene_rounding() {
+        // Lucene 10.5.2: boost=1, docFreq=docCount=sumTotalTermFreq=54_505,
+        // frequency=1 and encoded norm=1.
+        let scorer = Bm25::for_term(1.0, 54_505, 54_505, 54_505);
+        assert_eq!(scorer.score(1.0, 1).to_bits(), 0x368b_e976);
+    }
+
+    #[test]
     fn smallfloat_matches_lucene_contract() {
         assert_eq!(NUM_FREE_VALUES, 24);
         for i in 0..24 {
