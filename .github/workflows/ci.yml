@@ -9,6 +9,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Hosted runners can restore a cache built on a different CPU. Override the
+  # local benchmark's target-cpu=native so cached dependencies stay portable.
+  RUSTFLAGS: '-C target-cpu=generic'
 
 jobs:
   lint:

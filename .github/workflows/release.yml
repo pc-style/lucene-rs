@@ -52,6 +52,7 @@ jobs:
       contents: write
     env:
       VERSION: ${{ inputs.version }}
+      RUSTFLAGS: '-C target-cpu=generic'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
