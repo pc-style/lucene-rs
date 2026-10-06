@@ -84,6 +84,19 @@ class CompareCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("rerun", result.stderr.lower())
 
+    def test_invalid_top10_hit_vectors_fail(self):
+        variants = {
+            "duplicate_document": ROW.replace("1:5.000", "0:5.000"),
+            "more_than_ten_hits": "TERM\tx\t11\teq\t" + " ".join(f"{doc}:1.0" for doc in range(11)) + "\n",
+            "total_less_than_hits": ROW.replace("\t2\teq\t", "\t1\teq\t"),
+        }
+        for name, row in variants.items():
+            for optimized in (False, True):
+                with self.subTest(name=name, optimized=optimized):
+                    result = self.compare(row, row, optimized=optimized)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("error", result.stderr.lower())
+
     def test_malformed_dumps_fail_even_when_identical(self):
         variants = {
             "empty": "",
