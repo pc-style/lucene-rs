@@ -6,3 +6,4 @@ bench/src-lucene/
 bench/java/classes/
 bench/results-*.tsv
 bench/bin/
+.env.local

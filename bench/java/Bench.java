@@ -12,6 +12,7 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.PhraseQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TermQuery;
@@ -31,6 +32,10 @@ public class Bench {
       Query q;
       if (kt[0].equals("TERM")) {
         q = new TermQuery(new Term("body", terms[0]));
+      } else if (kt[0].equals("PHRASE")) {
+        PhraseQuery.Builder pb = new PhraseQuery.Builder();
+        for (String t : terms) pb.add(new Term("body", t));
+        q = pb.build();
       } else {
         BooleanClause.Occur occur =
             kt[0].equals("AND") ? BooleanClause.Occur.MUST : BooleanClause.Occur.SHOULD;
@@ -96,7 +101,7 @@ public class Bench {
     }
     StringBuilder sb = new StringBuilder();
     sb.append(String.format(Locale.ROOT, "{\"engine\":\"lucene\",\"open_ms\":%.2f,\"cold_pass_ms\":%.2f", openMs, coldPassMs));
-    for (String kind : new String[] {"TERM", "AND", "OR"}) {
+    for (String kind : new String[] {"TERM", "AND", "OR", "PHRASE"}) {
       List<Double> m = new ArrayList<>();
       for (int i = 0; i < medians.length; i++) if (queries.get(i).kind.equals(kind)) m.add(medians[i]);
       double[] s = m.stream().mapToDouble(Double::doubleValue).sorted().toArray();

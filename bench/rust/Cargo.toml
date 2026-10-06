@@ -1,0 +1,12 @@
+[package]
+name = "lucene-rs-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Benchmark and equivalence harness comparing lucene-rs with Apache Lucene"
+
+[dependencies]
+lucene-rs = { path = "../.." }
+
+[lints]
+workspace = true

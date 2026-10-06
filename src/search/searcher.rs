@@ -251,6 +251,12 @@ fn score_segment(w: &Weight, seg: &SegmentReader, c: &mut TopScoreDocCollector) 
             return Ok(());
         }
         Weight::Term { sim: None, .. } | Weight::MatchNone => return Ok(()),
+        Weight::Phrase { field, terms, sim } => {
+            if let Some(mut s) = phrase_scorer(seg, field, terms, sim.as_ref())? {
+                s.score_top_k(c, live);
+            }
+            return Ok(());
+        }
         Weight::Boolean {
             clauses,
             min_should_match,
@@ -330,6 +336,38 @@ fn conjunction(mut subs: Vec<(BoxScorer<'_>, bool)>) -> Option<BoxScorer<'_>> {
     }
 }
 
+/// Exact-phrase scorer for one segment, or `None` if some term is absent there.
+fn phrase_scorer<'a>(
+    seg: &'a SegmentReader,
+    field: &str,
+    terms: &[(Vec<u8>, u32)],
+    sim: Option<&Bm25>,
+) -> Result<Option<PhraseScorer<'a>>> {
+    let Some(info) = seg.field_infos().get(field) else {
+        return Ok(None);
+    };
+    if info.index_options.is_indexed_without_positions() {
+        return Err(Error::IllegalArgument(format!(
+            "field \"{field}\" was indexed without position data; cannot run a phrase query"
+        )));
+    }
+    let Some(sim) = sim else { return Ok(None) };
+    let mut postings = Vec::with_capacity(terms.len());
+    for (t, pos) in terms {
+        let Some((fi, meta)) = seg.term_meta(field, t) else {
+            return Ok(None);
+        };
+        let pos = i32::try_from(*pos)
+            .map_err(|_| Error::IllegalArgument("phrase position too large".into()))?;
+        postings.push((seg.postings(&fi, &meta, true), pos));
+    }
+    Ok(Some(PhraseScorer::new(
+        postings,
+        sim.clone(),
+        seg.norms(info.number),
+    )))
+}
+
 /// A doc-at-a-time scorer for any weight, or `None` if nothing in the segment can match.
 fn scorer<'a>(w: &Weight, seg: &'a SegmentReader) -> Result<Option<BoxScorer<'a>>> {
     Ok(match w {
@@ -343,29 +381,7 @@ fn scorer<'a>(w: &Weight, seg: &'a SegmentReader) -> Result<Option<BoxScorer<'a>
             scorer(inner, seg)?.map(|s| -> BoxScorer { Box::new(ConstantScorer::new(s, *score)) })
         }
         Weight::Phrase { field, terms, sim } => {
-            let Some(sim) = sim else { return Ok(None) };
-            let Some(info) = seg.field_infos().get(field) else {
-                return Ok(None);
-            };
-            if !info.index_options.has_positions() {
-                return Err(Error::IllegalArgument(format!(
-                    "field \"{field}\" was indexed without position data; cannot run a phrase query"
-                )));
-            }
-            let mut postings = Vec::with_capacity(terms.len());
-            for (t, pos) in terms {
-                let Some((fi, meta)) = seg.term_meta(field, t) else {
-                    return Ok(None);
-                };
-                let pos = i32::try_from(*pos)
-                    .map_err(|_| Error::IllegalArgument("phrase position too large".into()))?;
-                postings.push((seg.postings(&fi, &meta, true), pos));
-            }
-            Some(Box::new(PhraseScorer::new(
-                postings,
-                sim.clone(),
-                seg.norms(info.number),
-            )))
+            phrase_scorer(seg, field, terms, sim.as_ref())?.map(|s| -> BoxScorer { Box::new(s) })
         }
         Weight::Boolean {
             clauses,

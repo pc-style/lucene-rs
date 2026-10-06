@@ -1,0 +1,16 @@
+lucene-rs
+Copyright 2026 pcstyle and the lucene-rs contributors
+
+This product is a Rust port of parts of Apache Lucene (https://lucene.apache.org/),
+developed at The Apache Software Foundation (http://www.apache.org/) and licensed under the
+Apache License, Version 2.0. Ported components include the Lucene104 postings format
+(ForUtil, PForUtil, postings writer and reader, skip data and impacts), SmallFloat,
+BM25Similarity, and the TermScorer, MaxScoreBulkScorer, BlockMaxConjunctionBulkScorer and
+TopScoreDocCollector search algorithms.
+
+Apache Lucene
+Copyright 2001-2026 The Apache Software Foundation
+
+"Apache", "Apache Lucene" and "Lucene" are trademarks of The Apache Software Foundation.
+lucene-rs is an independent project and is not affiliated with or endorsed by The Apache
+Software Foundation.

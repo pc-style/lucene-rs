@@ -19,6 +19,11 @@ impl IndexOptions {
     pub fn has_freqs(self) -> bool {
         self >= Self::DocsAndFreqs
     }
+    /// Indexed, but without the positions phrase queries need.
+    #[must_use]
+    pub fn is_indexed_without_positions(self) -> bool {
+        self != Self::None && self != Self::DocsAndFreqsAndPositions
+    }
     #[must_use]
     pub fn has_positions(self) -> bool {
         self == Self::DocsAndFreqsAndPositions

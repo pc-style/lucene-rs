@@ -17,6 +17,8 @@
 )]
 
 use crate::codec::postings_reader::{NO_MORE_DOCS, PostingsEnum};
+use crate::index::LiveDocs;
+use crate::search::collector::TopScoreDocCollector;
 use crate::search::term_scorer::TermScorer;
 use crate::sim::Bm25;
 
@@ -334,7 +336,9 @@ pub struct PhraseScorer<'a> {
     norms: Option<&'a [u8]>,
     doc: i32,
     freq: u32,
-    lists: Vec<Vec<i32>>,
+    order: Vec<(u32, usize)>,
+    cands: Vec<i32>,
+    next: Vec<i32>,
 }
 
 impl<'a> PhraseScorer<'a> {
@@ -351,7 +355,9 @@ impl<'a> PhraseScorer<'a> {
             norms,
             doc: -1,
             freq: 0,
-            lists: vec![Vec::new(); n],
+            order: Vec::with_capacity(n),
+            cands: Vec::new(),
+            next: Vec::new(),
         }
     }
 
@@ -377,34 +383,114 @@ impl<'a> PhraseScorer<'a> {
 
     /// Number of positions p such that every term i occurs at p + `offset_i`.
     fn phrase_freq(&mut self) -> u32 {
-        for (i, (p, offset)) in self.postings.iter_mut().enumerate() {
-            let list = &mut self.lists[i];
-            list.clear();
-            for _ in 0..p.freq() {
-                list.push(p.next_position() as i32 - *offset);
+        // Intersect relative positions (position - query offset), rarest term in this doc
+        // first, reading each other term's positions only as far as the candidates go and
+        // stopping as soon as no candidate is left. Unread positions are skipped lazily by
+        // the postings enum.
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
+        order.extend(
+            self.postings
+                .iter_mut()
+                .enumerate()
+                .map(|(i, (p, _))| (p.freq(), i)),
+        );
+        order.sort_unstable();
+        let mut cands = std::mem::take(&mut self.cands);
+        let mut next = std::mem::take(&mut self.next);
+        cands.clear();
+        let mut terms = order.iter();
+        if let Some(&(freq, i)) = terms.next() {
+            let (p, off) = &mut self.postings[i];
+            for _ in 0..freq {
+                cands.push(p.next_position() as i32 - *off);
             }
         }
-        let Some((first, rest)) = self.lists.split_first() else {
-            return 0;
-        };
-        let mut idx = vec![0usize; rest.len()];
-        let mut freq = 0;
-        'cand: for &start in first {
-            for (j, list) in rest.iter().enumerate() {
-                let k = &mut idx[j];
-                while *k < list.len() && list[*k] < start {
-                    *k += 1;
+        for &(freq, i) in terms {
+            if cands.is_empty() {
+                break;
+            }
+            let (p, off) = &mut self.postings[i];
+            next.clear();
+            let mut c = 0;
+            for _ in 0..freq {
+                let pos = p.next_position() as i32 - *off;
+                while c < cands.len() && cands[c] < pos {
+                    c += 1;
                 }
-                if *k == list.len() {
-                    break 'cand;
+                if c == cands.len() {
+                    break;
                 }
-                if list[*k] != start {
-                    continue 'cand;
+                if cands[c] == pos {
+                    next.push(pos);
+                    c += 1;
                 }
             }
-            freq += 1;
+            std::mem::swap(&mut cands, &mut next);
         }
+        let freq = cands.len() as u32;
+        self.order = order;
+        self.cands = cands;
+        self.next = next;
         freq
+    }
+
+    #[inline]
+    fn norm(&self, doc: i32) -> u8 {
+        self.norms.map_or(1, |n| n[doc as usize])
+    }
+
+    /// Top-k scoring with dynamic pruning (the role of Lucene's phrase impacts): once the
+    /// collector has a competitive threshold, skips blocks whose best possible phrase score,
+    /// bounded by each term's block impacts (phrase freq <= term freq), cannot compete, and
+    /// skips reading positions for docs whose smallest term freq cannot compete.
+    pub fn score_top_k(&mut self, c: &mut TopScoreDocCollector, live: Option<&LiveDocs>) {
+        let mut block_up_to = -1;
+        let mut block_bound = f32::INFINITY;
+        let mut doc = self.postings[0].0.next_doc();
+        loop {
+            doc = self.conjunction(doc);
+            if doc == NO_MORE_DOCS {
+                return;
+            }
+            let min_comp = c.min_competitive_score;
+            if min_comp > 0.0 {
+                if doc > block_up_to {
+                    // all enums sit on `doc`, so their current blocks bound (doc, up_to]
+                    block_up_to = NO_MORE_DOCS;
+                    block_bound = f32::INFINITY;
+                    for (pe, _) in &self.postings {
+                        block_up_to = block_up_to.min(pe.doc_id_up_to(0));
+                        let x = pe.max_impact_x(0, self.sim.norm_inverses());
+                        block_bound = block_bound.min(self.sim.score_x(x));
+                    }
+                }
+                if block_bound < min_comp {
+                    if block_up_to == NO_MORE_DOCS {
+                        return;
+                    }
+                    doc = self.postings[0].0.advance(block_up_to + 1);
+                    continue;
+                }
+                let min_freq = self
+                    .postings
+                    .iter_mut()
+                    .map(|(pe, _)| pe.freq())
+                    .min()
+                    .unwrap_or(0);
+                if self.sim.score(min_freq as f32, self.norm(doc)) < min_comp {
+                    doc = self.postings[0].0.next_doc();
+                    continue;
+                }
+            }
+            if live.is_none_or(|l| l.get(doc as u32)) {
+                let f = self.phrase_freq();
+                if f > 0 {
+                    c.collect(doc, self.sim.score(f as f32, self.norm(doc)));
+                }
+            }
+            doc = self.postings[0].0.next_doc();
+        }
     }
 
     fn confirm(&mut self, mut doc: i32) -> i32 {
@@ -438,8 +524,7 @@ impl Scorer for PhraseScorer<'_> {
         self.confirm(d)
     }
     fn score(&mut self) -> f32 {
-        let norm = self.norms.map_or(1, |n| n[self.doc as usize]);
-        self.sim.score(self.freq as f32, norm)
+        self.sim.score(self.freq as f32, self.norm(self.doc))
     }
     fn cost(&self) -> i64 {
         self.postings[0].0.cost()

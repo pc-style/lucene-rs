@@ -2,31 +2,54 @@
 name = "lucene-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "A Rust port of Apache Lucene's core: Lucene104 postings, BM25, block-max top-k search (MaxScore, block-max conjunction), segments, merges, analyzers and a query parser"
+license = "Apache-2.0"
+repository = "https://github.com/pc-style/lucene-rs"
+readme = "README.md"
+keywords = ["search", "lucene", "full-text", "bm25", "inverted-index"]
+categories = ["text-processing", "database-implementations", "data-structures"]
+exclude = ["/bench", "/.github", "/scripts", "/docs/*.png"]
 
 [dependencies]
 crc32fast = "1.5.2"
 memmap2 = "0.9.11"
 rustc-hash = "2.1.3"
+serde_json = { version = "1.0.151", optional = true }
 unicode-segmentation = "1.13.3"
+
+[workspace]
+members = [".", "bench/rust"]
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-debug = 1
+debug = "line-tables-only"
 
 [features]
+# Build the `lucene-rs` command-line tool (JSON Lines indexing, search, stats).
+cli = ["dep:serde_json"]
+# Profiling builds: keep hot functions out of line so profilers attribute time accurately.
 profile = []
+
+[[bin]]
+name = "lucene-rs"
+path = "src/bin/lucene-rs.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 # deny, not forbid: exactly two audited sites opt out (mmap in index/segment.rs and the AVX2
 # prefix sum in codec/postings_reader.rs). See docs/lints.md.
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 unwrap_used = "deny"

@@ -28,7 +28,8 @@ public class Indexer {
         };
     FieldType ft = new FieldType();
     ft.setTokenized(true);
-    ft.setIndexOptions(IndexOptions.DOCS_AND_FREQS); // same as the Rust port: no positions
+    boolean positions = args.length > 2 && args[2].equals("--positions");
+    ft.setIndexOptions(positions ? IndexOptions.DOCS_AND_FREQS_AND_POSITIONS : IndexOptions.DOCS_AND_FREQS);
     ft.freeze();
 
     IndexWriterConfig iwc = new IndexWriterConfig(analyzer);

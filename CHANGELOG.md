@@ -1,0 +1,21 @@
+# Changelog
+
+## 0.1.0 (unreleased)
+
+First release.
+
+- Lucene104 postings format port: 256-doc FOR/bitset doc blocks, PFOR freqs and positions,
+  two-level skip data with impacts, generated per-bit-width decoders.
+- BM25 (`k1 = 1.2`, `b = 0.75`) with Lucene's one-byte SmallFloat norms; scores are
+  bit-identical to Lucene 10.5.2 on the benchmark corpus.
+- Top-k search with Lucene's dynamic pruning: `BatchScoreBulkScorer` + `ImpactsDISI` for terms,
+  `MaxScoreBulkScorer` for disjunctions, `BlockMaxConjunctionBulkScorer` for conjunctions.
+- Queries: term, boolean (must/should/must-not/filter, minimum should match), exact phrase,
+  boost, constant score, match-all; Lucene-style rewrites.
+- Indexing: documents with text, keyword and stored fields; segments flushed by RAM or doc
+  count; deletes and updates by term; log merge policy; force merge; atomic commits;
+  `DirectoryReader::reopen`.
+- Analysis: standard (UAX#29), whitespace, simple, keyword and per-field analyzers; English
+  stop words.
+- Classic query parser.
+- `lucene-rs` CLI (feature `cli`): JSON Lines indexing, search, delete, merge, stats, check.
