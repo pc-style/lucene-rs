@@ -72,8 +72,13 @@ pub struct Bm25 {
 
 /// `BM25Similarity#idf`: `ln(1 + (docCount - docFreq + 0.5) / (docFreq + 0.5))`.
 #[must_use]
+#[allow(
+    clippy::imprecise_flops,
+    reason = "Match Lucene's Math.log(1 + x) rounding rather than log1p(x)"
+)]
 pub fn idf(doc_freq: u64, doc_count: u64) -> f32 {
-    (((doc_count as i64 - doc_freq as i64) as f64 + 0.5) / (doc_freq as f64 + 0.5)).ln_1p() as f32
+    (1.0 + ((doc_count as i64 - doc_freq as i64) as f64 + 0.5) / (doc_freq as f64 + 0.5)).ln()
+        as f32
 }
 
 /// `BM25Similarity#avgFieldLength`.
@@ -142,6 +147,21 @@ impl Bm25 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idf_matches_lucene_rounding() {
+        // Lucene 10.5.2 BM25Similarity.idfExplain with docFreq = docCount = 54_505.
+        // Math.log(1 + x) and log1p(x) round to different float bits for this input.
+        assert_eq!(idf(54_505, 54_505).to_bits(), 0x3719_e736);
+    }
+
+    #[test]
+    fn score_matches_lucene_rounding() {
+        // Lucene 10.5.2: boost=1, docFreq=docCount=sumTotalTermFreq=54_505,
+        // frequency=1 and encoded norm=1.
+        let scorer = Bm25::for_term(1.0, 54_505, 54_505, 54_505);
+        assert_eq!(scorer.score(1.0, 1).to_bits(), 0x368b_e976);
+    }
 
     #[test]
     fn smallfloat_matches_lucene_contract() {
