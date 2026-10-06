@@ -4,6 +4,7 @@
 
 #![allow(clippy::as_conversions, clippy::cast_precision_loss)]
 
+use lucene_rs::search::TotalHitsRelation;
 use lucene_rs::{DirectoryReader, IndexSearcher};
 use lucene_rs_bench::{load_queries, summary};
 use std::io::Write;
@@ -26,11 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .map(|h| format!("{}:{:.9e}", h.doc, h.score))
                     .collect();
+                let relation = match top.total_hits.relation {
+                    TotalHitsRelation::EqualTo => "eq",
+                    TotalHitsRelation::GreaterThanOrEqualTo => "gte",
+                };
                 writeln!(
                     out,
-                    "{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     q.line,
                     top.total_hits.value,
+                    relation,
                     hits.join(" ")
                 )?;
             }

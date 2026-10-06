@@ -24,15 +24,24 @@ first for equivalence (same top-10, same scores), then for speed.
 
 ## Equivalence
 
-`scripts/compare.py` diffs the top-10 dumps:
+`scripts/compare.py` gates strict equality of the top-10 dumps: query kind/text,
+document IDs in order, finite raw float32 score bits, and reported hit values/relations.
+It exits with status 1 for a mismatch and status 2 for malformed inputs. Dumps have five
+TSV columns: `KIND`, terms, hit value, hit relation (`eq` or `gte`), and `doc:score` hits.
+Rerun both dump commands to regenerate older dumps that omit the relation.
+
+The retained benchmark's reported comparisons were:
 
 | query set | queries | same docs, same order | bit-identical scores | same hit count |
 |---|---:|---:|---:|---:|
 | term / AND / OR | 901 | 901 | 8,986 / 8,986 | 901 |
 | exact phrase | 300 | 300 | 2,459 / 2,459 | 300 |
 
-Matching hit counts mean the collector's 1,000-hit threshold and the block skipping fire at the
-same points in both engines.
+`eq` means an exact hit count; `gte` means a lower bound after competitive pruning.
+Matching reported values/relations is an implementation equality assertion, not proof that
+the engines skipped identical blocks. Different valid lower bounds can result from different
+skipping strategies; independent exact counts are needed to verify match-count correctness.
+The retained comparisons above did not record relations and have not been rerun here.
 
 ## Results
 
