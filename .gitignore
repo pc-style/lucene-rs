@@ -6,4 +6,5 @@ bench/src-lucene/
 bench/java/classes/
 bench/results-*.tsv
 bench/bin/
+__pycache__/
 .env.local
