@@ -17,6 +17,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.store.MMapDirectory;
 
 /** Same protocol as lucene-rs/src/bin/bench.rs. */
@@ -73,7 +74,8 @@ public class Bench {
             if (sb.length() > 0) sb.append(' ');
             sb.append(ids.longValue()).append(':').append(String.format(Locale.ROOT, "%.9e", sd.score));
           }
-          out.println(q.line + "\t" + td.totalHits.value() + "\t" + sb);
+          String relation = td.totalHits.relation() == TotalHits.Relation.EQUAL_TO ? "eq" : "gte";
+          out.println(q.line + "\t" + td.totalHits.value() + "\t" + relation + "\t" + sb);
         }
       }
       return;
