@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Typed i64/f64 range queries, single-value numeric/keyword doc values and field sorting.
+- Stateless `search_after` collection with bounded top-k heaps and score/field hit boundaries.
+  Exact counting is a separate operation; applications own pagination sessions and tokens.
+- Doc values survive updates, deletes, merges and reopen; checksummed new segment files.
+- New segment metadata reads 0.1 indexes; newly written segments require 0.2. Back up before
+  upgrading. Public field metadata and query variants expanded (source-breaking for exhaustive users).
+- Numeric indexes are sorted in RAM, not BKD; paged search scans all matches. Existing published
+  benchmark scores measure the 0.1 text-search path, not these additions.
+
 ## 0.1.0 (2026-10-06)
 
 First release.

@@ -63,6 +63,8 @@ pub mod sim;
 pub use analysis::{Analyzer, StandardAnalyzer};
 pub use document::{Document, Field, FieldType, FieldValue, IndexOptions, Store};
 pub use error::{Error, Result};
+pub use index::doc_values::SortValue;
 pub use index::{DirectoryReader, IndexWriter, IndexWriterConfig, OpenMode, Term};
 pub use queryparser::QueryParser;
 pub use search::{BooleanQuery, IndexSearcher, Occur, PhraseQuery, Query, ScoreDoc, TopDocs};
+pub use search::{FieldDoc, MissingValue, Sort, SortField, SortOrder};

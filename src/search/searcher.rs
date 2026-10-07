@@ -4,6 +4,7 @@
 use crate::codec::postings_reader::NO_MORE_DOCS;
 use crate::document::Document;
 use crate::error::{Error, Result};
+use crate::index::doc_values::SortValue;
 use crate::index::{DirectoryReader, LiveDocs, SegmentReader, Term};
 use crate::search::bulk::{BlockMaxConjunctionBulkScorer, MaxScoreBulkScorer, score_term};
 use crate::search::collector::TopScoreDocCollector;
@@ -14,6 +15,7 @@ use crate::search::scorer::{
 };
 use crate::search::term_scorer::TermScorer;
 use crate::sim::{Bm25, avg_field_length, idf, idf_sum};
+use std::ops::Bound;
 
 /// Exact hit counting stops after this many hits (Lucene's default for `search(query, n)`).
 pub const TOTAL_HITS_THRESHOLD: u64 = 1000;
@@ -46,7 +48,13 @@ pub struct TopDocs {
 }
 
 /// A query prepared against index-wide statistics (Lucene's `Weight`).
-enum Weight {
+pub(super) enum Weight {
+    Range {
+        field: String,
+        lower: Bound<SortValue>,
+        upper: Bound<SortValue>,
+        score: f32,
+    },
     /// `sim` is `None` when the term occurs nowhere in the index.
     Term {
         term: Term,
@@ -94,8 +102,28 @@ impl IndexSearcher {
         self.reader.document(doc)
     }
 
-    fn create_weight(&self, q: &Query, boost: f32) -> Weight {
+    pub(super) fn create_weight(&self, q: &Query, boost: f32) -> Weight {
         match q {
+            Query::I64Range {
+                field,
+                lower,
+                upper,
+            } => Weight::Range {
+                field: field.clone(),
+                lower: lower.map(SortValue::I64),
+                upper: upper.map(SortValue::I64),
+                score: boost,
+            },
+            Query::F64Range {
+                field,
+                lower,
+                upper,
+            } => Weight::Range {
+                field: field.clone(),
+                lower: lower.map(SortValue::F64),
+                upper: upper.map(SortValue::F64),
+                score: boost,
+            },
             Query::Term(term) => {
                 let field = term.field.as_str();
                 let sim = match (
@@ -161,6 +189,7 @@ impl IndexSearcher {
     /// # Errors
     /// [`Error::IllegalArgument`] for a phrase query on a field without positions.
     pub fn search(&self, query: &Query, n: usize) -> Result<TopDocs> {
+        self.validate_query(query)?;
         let n = n.max(1);
         let weight = self.create_weight(&query.rewrite(), 1.0);
         let mut c = TopScoreDocCollector::new(n, TOTAL_HITS_THRESHOLD);
@@ -195,6 +224,7 @@ impl IndexSearcher {
     /// # Errors
     /// As for [`IndexSearcher::search`].
     pub fn count(&self, query: &Query) -> Result<u64> {
+        self.validate_query(query)?;
         let weight = self.create_weight(&query.rewrite(), 0.0);
         let mut total = 0u64;
         for seg in self.reader.segments() {
@@ -312,7 +342,7 @@ fn score_segment(w: &Weight, seg: &SegmentReader, c: &mut TopScoreDocCollector) 
     Ok(())
 }
 
-fn is_live(live: Option<&LiveDocs>, doc: i32) -> bool {
+pub(super) fn is_live(live: Option<&LiveDocs>, doc: i32) -> bool {
     u32::try_from(doc).is_ok_and(|d| live.is_none_or(|l| l.get(d)))
 }
 
@@ -369,8 +399,17 @@ fn phrase_scorer<'a>(
 }
 
 /// A doc-at-a-time scorer for any weight, or `None` if nothing in the segment can match.
-fn scorer<'a>(w: &Weight, seg: &'a SegmentReader) -> Result<Option<BoxScorer<'a>>> {
+pub(super) fn scorer<'a>(w: &Weight, seg: &'a SegmentReader) -> Result<Option<BoxScorer<'a>>> {
     Ok(match w {
+        Weight::Range {
+            field,
+            lower,
+            upper,
+            score,
+        } => Some(Box::new(crate::search::scorer::RangeScorer::new(
+            seg.range_docs(field, lower, upper),
+            *score,
+        ))),
         Weight::MatchNone => None,
         Weight::Term { term, sim } => sim
             .as_ref()

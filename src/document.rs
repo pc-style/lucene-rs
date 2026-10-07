@@ -49,7 +49,16 @@ impl IndexOptions {
 
 /// How a field is indexed and stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocValuesType {
+    I64,
+    F64,
+    Keyword,
+}
+
+/// Postings, storage and single-valued column configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldType {
+    pub doc_values: Option<DocValuesType>,
     pub index_options: IndexOptions,
     /// Run the value through the analyzer (otherwise the whole value is one token).
     pub tokenized: bool,
@@ -62,6 +71,7 @@ pub struct FieldType {
 impl FieldType {
     /// Lucene's `TextField.TYPE_NOT_STORED`: tokenized, with frequencies, positions and norms.
     pub const TEXT: Self = Self {
+        doc_values: None,
         index_options: IndexOptions::DocsAndFreqsAndPositions,
         tokenized: true,
         stored: false,
@@ -69,6 +79,7 @@ impl FieldType {
     };
     /// Lucene's `StringField.TYPE_NOT_STORED`: the exact value as a single token, docs only.
     pub const STRING: Self = Self {
+        doc_values: None,
         index_options: IndexOptions::Docs,
         tokenized: false,
         stored: false,
@@ -76,6 +87,7 @@ impl FieldType {
     };
     /// Lucene's `StoredField.TYPE`: stored, not indexed.
     pub const STORED_ONLY: Self = Self {
+        doc_values: None,
         index_options: IndexOptions::None,
         tokenized: false,
         stored: true,
@@ -184,6 +196,24 @@ pub struct Field {
 }
 
 impl Field {
+    pub fn numeric_i64(name: impl Into<String>, value: i64, store: Store) -> Self {
+        let mut ft = FieldType::STORED_ONLY.stored(store == Store::Yes);
+        ft.doc_values = Some(DocValuesType::I64);
+        Self::new(name, value, ft)
+    }
+
+    pub fn numeric_f64(name: impl Into<String>, value: f64, store: Store) -> Self {
+        let mut ft = FieldType::STORED_ONLY.stored(store == Store::Yes);
+        ft.doc_values = Some(DocValuesType::F64);
+        Self::new(name, value, ft)
+    }
+
+    pub fn sorted_keyword(name: impl Into<String>, value: impl Into<String>, store: Store) -> Self {
+        let mut ft = FieldType::STRING.stored(store == Store::Yes);
+        ft.doc_values = Some(DocValuesType::Keyword);
+        Self::new(name, value.into(), ft)
+    }
+
     pub fn new(
         name: impl Into<String>,
         value: impl Into<FieldValue>,

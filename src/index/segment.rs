@@ -4,11 +4,12 @@
 use crate::codec::postings_reader::{IndexedFeatures, PostingsEnum};
 use crate::codec::postings_writer::TermMeta;
 use crate::codec::store::{In, Out};
-use crate::document::{Document, Field, FieldType, IndexOptions};
+use crate::document::{DocValuesType, Document, Field, FieldType, IndexOptions};
 use crate::error::{Result, corrupt};
 use crate::index::codec_util::{
     check_header, read_string, verify_checksum, write_footer, write_header, write_string,
 };
+use crate::index::doc_values::{self, Columns, NumericIndex, SortValue};
 use crate::index::field_infos::{FieldInfo, FieldInfos};
 use crate::index::live_docs::LiveDocs;
 use crate::index::stored::StoredFieldsReader;
@@ -25,7 +26,7 @@ pub const POS_CODEC: &str = "LuceneRsPostingsPos";
 pub const TIM_CODEC: &str = "LuceneRsTerms";
 pub const NRM_CODEC: &str = "LuceneRsNorms";
 pub const VERSION: u32 = 1;
-pub(crate) const EXTENSIONS: &[&str] = &["si", "doc", "pos", "tim", "nrm", "fdt", "fdx"];
+pub(crate) const EXTENSIONS: &[&str] = &["si", "doc", "pos", "tim", "nrm", "fdt", "fdx", "dvm"];
 
 /// Index-wide statistics of one field in one segment (inputs to BM25).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct FieldStats {
 
 #[derive(Clone, Debug)]
 pub struct SegmentInfo {
+    pub(crate) format_version: u32,
     pub name: String,
     pub max_doc: u32,
     pub fields: FieldInfos,
@@ -54,6 +56,7 @@ impl SegmentInfo {
     pub fn files(&self) -> Vec<String> {
         EXTENSIONS
             .iter()
+            .filter(|&&ext| ext != "dvm" || self.format_version >= 2)
             .map(|e| format!("{}.{e}", self.name))
             .collect()
     }
@@ -75,7 +78,7 @@ impl SegmentInfo {
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         let mut out = Out::new();
-        write_header(&mut out, SI_CODEC, VERSION);
+        write_header(&mut out, SI_CODEC, self.format_version);
         write_string(&mut out, &self.name);
         out.write_vint(self.max_doc);
         out.write_vint(u32_from(self.fields.len(), "fields")?);
@@ -84,6 +87,14 @@ impl SegmentInfo {
             out.write_vint(f.number);
             out.write_byte(f.index_options.to_byte());
             out.write_byte(u8::from(f.has_norms));
+            if self.format_version >= 2 {
+                out.write_byte(match f.doc_values {
+                    None => 0,
+                    Some(DocValuesType::I64) => 1,
+                    Some(DocValuesType::F64) => 2,
+                    Some(DocValuesType::Keyword) => 3,
+                });
+            }
             if let Some(s) = self.field_stats(f.number) {
                 out.write_byte(1);
                 out.write_vlong(s.doc_count);
@@ -102,12 +113,16 @@ impl SegmentInfo {
 
     fn decode(data: &[u8], file: &str) -> Result<Self> {
         verify_checksum(data, file)?;
-        let start = check_header(data, SI_CODEC, VERSION, file)?;
+        let (start, format_version) = match check_header(data, SI_CODEC, 2, file) {
+            Ok(start) => (start, 2),
+            Err(_) => (check_header(data, SI_CODEC, 1, file)?, 1),
+        };
         let mut i = In::new(data, start);
         let name = read_string(&mut i, file)?;
         let max_doc = i.read_vint();
         let n = i.read_vint();
         let mut info = Self {
+            format_version,
             name,
             max_doc,
             fields: FieldInfos::default(),
@@ -119,7 +134,19 @@ impl SegmentInfo {
             let index_options = IndexOptions::from_byte(i.read_byte())
                 .ok_or_else(|| corrupt(format!("{file}: bad index options")))?;
             let has_norms = i.read_byte() != 0;
+            let doc_values = if format_version >= 2 {
+                match i.read_byte() {
+                    0 => None,
+                    1 => Some(DocValuesType::I64),
+                    2 => Some(DocValuesType::F64),
+                    3 => Some(DocValuesType::Keyword),
+                    _ => return Err(corrupt("invalid doc values metadata")),
+                }
+            } else {
+                None
+            };
             info.fields.insert(FieldInfo {
+                doc_values,
                 name,
                 number,
                 index_options,
@@ -156,6 +183,9 @@ fn map(dir: &Path, file: &str) -> Result<Mmap> {
 
 /// An open, immutable segment plus its current deletions.
 pub struct SegmentReader {
+    dvm: Option<Mmap>,
+    pub(crate) columns: Columns,
+    numeric: HashMap<u32, NumericIndex>,
     pub(crate) info: SegmentInfo,
     pub(crate) del_gen: u64,
     doc: Mmap,
@@ -182,6 +212,25 @@ impl SegmentReader {
         let nrm = map(dir, &format!("{name}.nrm"))?;
         let fdt = map(dir, &format!("{name}.fdt"))?;
         let fdx = map(dir, &format!("{name}.fdx"))?;
+        let dvm = if info.format_version >= 2 {
+            Some(map(dir, &format!("{name}.dvm"))?)
+        } else {
+            None
+        };
+        let columns = dvm
+            .as_ref()
+            .map(|data| doc_values::decode(data, info.max_doc, &info.fields))
+            .transpose()?
+            .unwrap_or_default();
+        let numeric = columns
+            .iter()
+            .filter(|(n, _)| {
+                info.fields.by_number(**n).is_some_and(|f| {
+                    matches!(f.doc_values, Some(DocValuesType::I64 | DocValuesType::F64))
+                })
+            })
+            .map(|(&n, values)| (n, NumericIndex::new(values)))
+            .collect();
         check_header(&doc, DOC_CODEC, VERSION, ".doc")?;
         check_header(&pos, POS_CODEC, VERSION, ".pos")?;
         check_header(&tim, TIM_CODEC, VERSION, ".tim")?;
@@ -218,6 +267,9 @@ impl SegmentReader {
             None
         };
         Ok(Self {
+            dvm,
+            columns,
+            numeric,
             info,
             del_gen,
             doc,
@@ -258,6 +310,28 @@ impl SegmentReader {
             .fields
             .get(field)
             .and_then(|f| self.info.field_stats(f.number))
+    }
+
+    /// Single-valued column value for a segment-local document.
+    #[must_use]
+    pub fn doc_value(&self, field: &str, doc: u32) -> Option<&SortValue> {
+        self.columns
+            .get(&self.info.fields.get(field)?.number)?
+            .get(usize_from(doc))?
+            .as_ref()
+    }
+
+    pub(crate) fn range_docs(
+        &self,
+        field: &str,
+        lower: &std::ops::Bound<SortValue>,
+        upper: &std::ops::Bound<SortValue>,
+    ) -> Vec<u32> {
+        self.info
+            .fields
+            .get(field)
+            .and_then(|f| self.numeric.get(&f.number))
+            .map_or_else(Vec::new, |index| index.range(lower, upper))
     }
 
     pub(crate) fn field_terms(&self, number: u32) -> Option<&FieldTerms> {
@@ -328,6 +402,9 @@ impl SegmentReader {
     /// # Errors
     /// [`Error::Corrupt`](crate::Error::Corrupt) naming the first file that fails.
     pub fn check_integrity(&self) -> Result<()> {
+        if let Some(data) = &self.dvm {
+            verify_checksum(data, &format!("{}.dvm", self.info.name))?;
+        }
         for (data, ext) in [
             (&self.doc, "doc"),
             (&self.pos, "pos"),

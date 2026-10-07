@@ -51,6 +51,51 @@ impl Scorer for TermScorer<'_> {
 
 pub type BoxScorer<'a> = Box<dyn Scorer + 'a>;
 
+pub struct RangeScorer {
+    docs: std::vec::IntoIter<u32>,
+    doc: i32,
+    score: f32,
+    cost: i64,
+}
+
+impl RangeScorer {
+    pub fn new(docs: Vec<u32>, score: f32) -> Self {
+        let cost = i64::try_from(docs.len()).unwrap_or(i64::MAX);
+        Self {
+            docs: docs.into_iter(),
+            doc: -1,
+            score,
+            cost,
+        }
+    }
+}
+
+impl Scorer for RangeScorer {
+    fn doc_id(&self) -> i32 {
+        self.doc
+    }
+    fn next_doc(&mut self) -> i32 {
+        self.doc = self
+            .docs
+            .next()
+            .and_then(|d| i32::try_from(d).ok())
+            .unwrap_or(NO_MORE_DOCS);
+        self.doc
+    }
+    fn advance(&mut self, target: i32) -> i32 {
+        while self.doc < target {
+            self.next_doc();
+        }
+        self.doc
+    }
+    fn score(&mut self) -> f32 {
+        self.score
+    }
+    fn cost(&self) -> i64 {
+        self.cost
+    }
+}
+
 /// All sub-scorers match. Scores are summed in a double over the scoring clauses.
 pub struct ConjunctionScorer<'a> {
     subs: Vec<(BoxScorer<'a>, bool)>, // (scorer, contributes to score), cheapest first

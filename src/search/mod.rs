@@ -2,6 +2,8 @@
 
 mod bulk;
 mod collector;
+mod page;
+pub use page::{FieldDoc, MissingValue, Sort, SortField, SortOrder};
 pub mod query;
 mod scorer;
 mod searcher;

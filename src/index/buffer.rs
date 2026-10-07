@@ -18,6 +18,7 @@ use crate::analysis::Analyzer;
 use crate::codec::store::In;
 use crate::document::{Document, FieldValue};
 use crate::error::{Error, Result};
+use crate::index::doc_values::{Columns, SortValue};
 use crate::index::field_infos::FieldInfos;
 use crate::index::segment::SegmentInfo;
 use crate::index::segment_writer::SegmentWriter;
@@ -51,6 +52,7 @@ struct FieldAcc {
 }
 
 pub struct DocumentsBuffer {
+    columns: Columns,
     fields: Vec<Option<FieldBuffer>>,
     stored: StoredFieldsWriter,
     pub max_doc: u32,
@@ -68,17 +70,30 @@ fn push_vint(buf: &mut Vec<u8>, mut v: u32) {
 }
 
 /// Checks every field and returns its number, so a bad document leaves no partial state.
-fn validate(doc: &Document, infos: &mut FieldInfos) -> Result<Vec<u32>> {
+pub fn validate(doc: &Document, infos: &mut FieldInfos) -> Result<Vec<u32>> {
+    let mut seen = std::collections::HashSet::new();
     doc.fields()
         .iter()
         .map(|f| {
+            if let Some(kind) = f.field_type.doc_values {
+                SortValue::from_field(&f.value, kind)?;
+                if !seen.insert(&f.name) {
+                    return Err(Error::IllegalArgument(format!(
+                        "duplicate doc value: {}",
+                        f.name
+                    )));
+                }
+            }
             if f.field_type.is_indexed() && f.value.as_str().is_none() {
                 return Err(Error::IllegalArgument(format!(
                     "field \"{}\": only text values can be indexed",
                     f.name
                 )));
             }
-            if !f.field_type.is_indexed() && !f.field_type.stored {
+            if !f.field_type.is_indexed()
+                && !f.field_type.stored
+                && f.field_type.doc_values.is_none()
+            {
                 return Err(Error::IllegalArgument(format!(
                     "field \"{}\" is neither indexed nor stored",
                     f.name
@@ -92,6 +107,7 @@ fn validate(doc: &Document, infos: &mut FieldInfos) -> Result<Vec<u32>> {
 impl DocumentsBuffer {
     pub fn new() -> Self {
         Self {
+            columns: Columns::new(),
             fields: Vec::new(),
             stored: StoredFieldsWriter::new(),
             max_doc: 0,
@@ -114,8 +130,22 @@ impl DocumentsBuffer {
         analyzer: &dyn Analyzer,
         infos: &mut FieldInfos,
     ) -> Result<()> {
-        let numbers = validate(doc, infos)?;
+        let mut validated = infos.clone();
+        let numbers = validate(doc, &mut validated)?;
+        *infos = validated;
         let doc_id = self.max_doc;
+        for (field, &number) in doc.fields().iter().zip(&numbers) {
+            if let Some(kind) = field.field_type.doc_values {
+                let value = SortValue::from_field(&field.value, kind)?;
+                let column = self.columns.entry(number).or_default();
+                column.resize(doc_id as usize, None);
+                self.bytes_used += match &value {
+                    SortValue::Keyword(s) => s.len() + 32,
+                    _ => 24,
+                };
+                column.push(Some(value));
+            }
+        }
         let mut accs = std::mem::take(&mut self.accs);
         let used = self.invert(doc, &numbers, analyzer, infos, &mut accs);
         for acc in &mut accs[..used] {
@@ -278,6 +308,7 @@ impl DocumentsBuffer {
             w.finish_field();
         }
         w.set_stored(self.stored);
+        w.set_doc_values(self.columns);
         w.finish(dir)
     }
 }

@@ -26,6 +26,17 @@ actually runs, check the answers are identical, then time both.
 
 [Get started](#quick-start) · [Benchmarks](#performance) · [API docs](https://docs.rs/lucene-rs) · [Scope](#what-is-ported)
 
+## In development: 0.2.0
+
+The embeddable engine now has typed numeric ranges, single-value doc values, field sorting
+and stateless `search_after` collection. Strata, a separate search-server repository, will
+consume the published crate; no HTTP server or web framework is included in this workspace.
+**These engine changes are not published yet**;
+the installation example below uses the released 0.1 engine.
+
+The charts and parity counts here describe the recorded **0.1 text-search benchmark**,
+not the new numeric collector or HTTP server. No 0.2 performance claim is made.
+
 ## Quick start
 
 ```toml
@@ -105,11 +116,23 @@ lucene-rs check  ./idx                                          # verify every c
 
 ### Not yet
 
-Numeric points and range queries, doc values and sorting by field, vectors, highlighting,
+BKD numeric points, compressed/multi-valued doc values, vectors, highlighting,
 wildcard/fuzzy/regex queries, sloppy phrases, stored-field compression, concurrent indexing
 and search threads, and other similarities than BM25. The file format follows Lucene104's
 postings layout but is not file-compatible with Lucene; the term dictionary is a simpler
 block index instead of BlockTree/FST.
+
+The in-development numeric columns and field-sort collector are native additions, not ports
+of Lucene's BKD or doc-values codecs. Single-value columns are loaded into RAM and numeric
+lookup builds a sorted in-memory index. `search_after` collects hits after a score/sort-value
+and document-ID boundary, without cursor state or a total count. Call `count` separately
+when needed. The current collector still scans all matches; its heap is bounded by the
+requested size, but range matching materializes document IDs. Existing `search` retains
+block pruning. Callers must keep the reader snapshot, query and sort consistent; token
+encoding, expiry, pagination limits and session validation belong to applications.
+
+0.2 reads 0.1 indexes, but newly written 0.2 segments cannot be read by 0.1. Back up before
+upgrading; downgrade requires restoring the backup.
 
 ## Correctness
 

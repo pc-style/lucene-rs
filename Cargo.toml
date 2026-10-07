@@ -1,6 +1,6 @@
 [package]
 name = "lucene-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A Rust port of Apache Lucene's core: Lucene104 postings, BM25, block-max top-k search (MaxScore, block-max conjunction), segments, merges, analyzers and a query parser"
