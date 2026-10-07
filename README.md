@@ -26,13 +26,12 @@ actually runs, check the answers are identical, then time both.
 
 [Get started](#quick-start) · [Benchmarks](#performance) · [API docs](https://docs.rs/lucene-rs) · [Scope](#what-is-ported)
 
-## In development: 0.2.0
+## New in 0.2.0
 
 The embeddable engine now has typed numeric ranges, single-value doc values, field sorting
-and stateless `search_after` collection. Strata, a separate search-server repository, will
-consume the published crate; no HTTP server or web framework is included in this workspace.
-**These engine changes are not published yet**;
-the installation example below uses the released 0.1 engine.
+and stateless `search_after` collection. [Strata](https://github.com/pc-style/strata), a
+separate search-server repository, consumes the published crate; no HTTP server or web
+framework is included in this workspace.
 
 The charts and parity counts here describe the recorded **0.1 text-search benchmark**,
 not the new numeric collector or HTTP server. No 0.2 performance claim is made.
@@ -41,7 +40,7 @@ not the new numeric collector or HTTP server. No 0.2 performance claim is made.
 
 ```toml
 [dependencies]
-lucene-rs = "0.1"
+lucene-rs = "0.2"
 ```
 
 ```rust
@@ -122,7 +121,7 @@ and search threads, and other similarities than BM25. The file format follows Lu
 postings layout but is not file-compatible with Lucene; the term dictionary is a simpler
 block index instead of BlockTree/FST.
 
-The in-development numeric columns and field-sort collector are native additions, not ports
+The numeric columns and field-sort collector are native additions, not ports
 of Lucene's BKD or doc-values codecs. Single-value columns are loaded into RAM and numeric
 lookup builds a sorted in-memory index. `search_after` collects hits after a score/sort-value
 and document-ID boundary, without cursor state or a total count. Call `count` separately

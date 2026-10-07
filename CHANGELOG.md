@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-07)
 
 - Typed i64/f64 range queries, single-value numeric/keyword doc values and field sorting.
 - Stateless `search_after` collection with bounded top-k heaps and score/field hit boundaries.
