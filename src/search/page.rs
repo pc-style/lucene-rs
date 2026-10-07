@@ -1,4 +1,4 @@
-//! Exact-count top-k pages. Heap memory is bounded by page size; unlike `search`, this
+//! Stateless sorted top-k collection. Heap memory is bounded by the requested size; unlike `search`, this
 //! collector visits every match and does not use score-based block pruning.
 use crate::codec::postings_reader::NO_MORE_DOCS;
 use crate::document::DocValuesType;
@@ -9,7 +9,6 @@ use crate::{IndexSearcher, Query};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Bound;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortOrder {
@@ -37,19 +36,6 @@ pub struct FieldDoc {
     pub doc: u32,
     pub score: f32,
     pub sort_values: Vec<Option<SortValue>>,
-}
-#[derive(Clone, Debug)]
-pub struct SearchCursor {
-    snapshot: Arc<()>,
-    query: Query,
-    sort: Sort,
-    last: FieldDoc,
-}
-#[derive(Clone, Debug)]
-pub struct SearchPage {
-    pub total_hits: u64,
-    pub hits: Vec<FieldDoc>,
-    pub next: Option<SearchCursor>,
 }
 
 fn invalid(message: &str) -> Error {
@@ -186,21 +172,24 @@ impl IndexSearcher {
         Ok(())
     }
 
-    /// A page ordered by score or typed columns, with an exact total hit count.
-    /// Cursors belong to this reader snapshot, query and sort; they cannot cross refreshes.
+    /// Collects up to `size` hits strictly after a score/field-sort boundary.
+    /// Pass `None` for the first batch, then the last returned hit for the next batch.
+    /// The caller must keep the reader snapshot, query and sort unchanged between calls.
+    /// This method manages no cursor state and computes no total; use [`Self::count`]
+    /// separately when an exact count is needed. This collector still visits all matches.
     /// Missing values are ordered independently of sort direction. Ties use ascending doc ID.
     ///
     /// # Errors
-    /// Invalid ranges, column types, page sizes (1..=10000), or mismatched cursors.
-    pub fn search_page(
+    /// Invalid ranges, column types, zero size, or malformed boundary values.
+    pub fn search_after(
         &self,
         query: &Query,
         sort: &Sort,
         size: usize,
-        after: Option<&SearchCursor>,
-    ) -> Result<SearchPage> {
-        if !(1..=10_000).contains(&size) {
-            return Err(invalid("page size must be 1..=10000"));
+        after: Option<&FieldDoc>,
+    ) -> Result<Vec<FieldDoc>> {
+        if size == 0 {
+            return Err(invalid("size must be positive"));
         }
         self.validate_query(query)?;
         if let Sort::Fields(fields) = sort {
@@ -211,19 +200,36 @@ impl IndexSearcher {
                 self.validate_column(&f.field, None)?;
             }
         }
-        if after.is_some_and(|c| {
-            !Arc::ptr_eq(&c.snapshot, &self.reader().snapshot)
-                || c.query != *query
-                || c.sort != *sort
-        }) {
-            return Err(invalid(
-                "cursor belongs to a different reader, query or sort",
-            ));
+        if let Some(after) = after {
+            if !after.score.is_finite() {
+                return Err(invalid("boundary score must be finite"));
+            }
+            match sort {
+                Sort::Score if !after.sort_values.is_empty() => {
+                    return Err(invalid("score boundary must not contain field values"));
+                }
+                Sort::Fields(fields) => {
+                    if fields.len() != after.sort_values.len() {
+                        return Err(invalid("boundary must contain one value per sort field"));
+                    }
+                    for (field, value) in fields.iter().zip(&after.sort_values) {
+                        let kind = match value {
+                            None => continue,
+                            Some(SortValue::I64(_)) => DocValuesType::I64,
+                            Some(SortValue::F64(v)) if v.is_finite() => DocValuesType::F64,
+                            Some(SortValue::Keyword(_)) => DocValuesType::Keyword,
+                            Some(SortValue::F64(_)) => {
+                                return Err(invalid("boundary value must be finite"));
+                            }
+                        };
+                        self.validate_column(&field.field, Some(kind))?;
+                    }
+                }
+                Sort::Score => (),
+            }
         }
         let weight = self.create_weight(&query.rewrite(), 1.0);
         let mut heap = BinaryHeap::new();
-        let limit = size.saturating_add(1);
-        let mut total_hits = 0u64;
         for (seg, &base) in self
             .reader()
             .segments()
@@ -241,7 +247,6 @@ impl IndexSearcher {
                 if !is_live(seg.live_docs(), doc) {
                     continue;
                 }
-                total_hits = total_hits.saturating_add(1);
                 let local = u32::try_from(doc).map_err(|_| invalid("negative doc ID"))?;
                 let hit = FieldDoc {
                     doc: base.saturating_add(local),
@@ -257,11 +262,11 @@ impl IndexSearcher {
                 if !hit.score.is_finite() {
                     return Err(invalid("nonfinite score"));
                 }
-                if after.is_some_and(|c| !compare(&hit, &c.last, sort).is_gt()) {
+                if after.is_some_and(|last| !compare(&hit, last, sort).is_gt()) {
                     continue;
                 }
                 let entry = Hit { hit, sort };
-                if heap.len() < limit {
+                if heap.len() < size {
                     heap.push(entry);
                 } else if heap.peek().is_some_and(|worst| entry < *worst) {
                     heap.pop();
@@ -269,19 +274,6 @@ impl IndexSearcher {
                 }
             }
         }
-        let mut hits: Vec<_> = heap.into_sorted_vec().into_iter().map(|h| h.hit).collect();
-        let more = hits.len() > size;
-        hits.truncate(size);
-        let next = hits.last().filter(|_| more).map(|last| SearchCursor {
-            snapshot: self.reader().snapshot.clone(),
-            query: query.clone(),
-            sort: sort.clone(),
-            last: last.clone(),
-        });
-        Ok(SearchPage {
-            total_hits,
-            hits,
-            next,
-        })
+        Ok(heap.into_sorted_vec().into_iter().map(|h| h.hit).collect())
     }
 }

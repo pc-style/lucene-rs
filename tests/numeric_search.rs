@@ -17,10 +17,11 @@ fn ids(searcher: &IndexSearcher, query: &Query, sort: &Sort) -> Vec<String> {
     let mut cursor = None;
     let mut result = Vec::new();
     loop {
-        let page = searcher
-            .search_page(query, sort, 2, cursor.as_ref())
+        let hits = searcher
+            .search_after(query, sort, 2, cursor.as_ref())
             .unwrap();
-        for hit in page.hits {
+        cursor = hits.last().cloned();
+        for hit in hits {
             result.push(
                 searcher
                     .doc(hit.doc)
@@ -30,7 +31,6 @@ fn ids(searcher: &IndexSearcher, query: &Query, sort: &Sort) -> Vec<String> {
                     .to_string(),
             );
         }
-        cursor = page.next;
         if cursor.is_none() {
             break;
         }
@@ -118,19 +118,12 @@ fn numeric_ranges_sorting_and_lifecycle() {
             .score
             .to_bits()
     );
-    let page = s.search_page(&Query::MatchAll, &asc, 2, None).unwrap();
-    assert!(s.search_page(&text, &asc, 2, page.next.as_ref()).is_err());
     w.delete_documents(Term::new("id", "b"));
     w.update_document(Term::new("id", "d"), &doc("d", Some(0)))
         .unwrap();
     w.force_merge(1).unwrap();
     w.commit().unwrap();
     let fresh = IndexSearcher::new(s.reader().reopen().unwrap().unwrap());
-    assert!(
-        fresh
-            .search_page(&Query::MatchAll, &asc, 2, page.next.as_ref())
-            .is_err()
-    );
     assert_eq!(
         ids(&fresh, &Query::MatchAll, &asc),
         ["f", "e", "d", "a", "c"]
@@ -215,12 +208,23 @@ fn doubles_keywords_and_rejected_update() {
         .is_err()
     );
     assert_eq!(
-        s.search_page(&q, &sort, 1, None).unwrap().hits[0].sort_values,
+        s.search_after(&q, &sort, 1, None).unwrap()[0].sort_values,
         [
             Some(SortValue::F64(1.25)),
             Some(SortValue::Keyword("b".into()))
         ]
     );
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let boundary = lucene_rs::FieldDoc {
+            doc: 0,
+            score: 1.0,
+            sort_values: vec![
+                Some(SortValue::F64(value)),
+                Some(SortValue::Keyword("b".into())),
+            ],
+        };
+        assert!(s.search_after(&q, &sort, 1, Some(&boundary)).is_err());
+    }
 }
 
 #[test]
@@ -237,13 +241,15 @@ fn pagination_beyond_hit_threshold_is_complete() {
     w.close().unwrap();
     let s = IndexSearcher::new(DirectoryReader::open(dir.path()).unwrap());
     let q = Query::MatchAll;
+    assert_eq!(s.count(&q).unwrap(), 1007);
     let mut after = None;
     let mut docs = Vec::new();
     loop {
-        let page = s.search_page(&q, &Sort::Score, 73, after.as_ref()).unwrap();
-        assert_eq!(page.total_hits, 1007);
-        docs.extend(page.hits.into_iter().map(|h| h.doc));
-        after = page.next;
+        let hits = s
+            .search_after(&q, &Sort::Score, 73, after.as_ref())
+            .unwrap();
+        after = hits.last().cloned();
+        docs.extend(hits.into_iter().map(|h| h.doc));
         if after.is_none() {
             break;
         }
@@ -252,7 +258,7 @@ fn pagination_beyond_hit_threshold_is_complete() {
 }
 
 #[test]
-fn signed_zero_ranges_are_distinct_in_rewrites_and_cursors() {
+fn signed_zero_ranges_are_distinct_in_rewrites() {
     let dir = tempfile::tempdir().unwrap();
     let mut writer = IndexWriter::open(dir.path(), IndexWriterConfig::default()).unwrap();
     for (id, value) in [("negative", -0.0), ("positive", 0.0), ("one", 1.0)] {
@@ -274,17 +280,109 @@ fn signed_zero_ranges_are_distinct_in_rewrites_and_cursors() {
     let negative = range(-0.0);
     let positive = range(0.0);
     assert_ne!(negative, positive);
-    let query = BooleanQuery::new()
-        .must(negative.clone())
-        .must(positive.clone())
-        .build();
+    let query = BooleanQuery::new().must(negative).must(positive).build();
     assert_eq!(ids(&searcher, &query, &Sort::Score), ["positive", "one"]);
-    let page = searcher
-        .search_page(&negative, &Sort::Score, 1, None)
+}
+
+#[test]
+fn search_after_is_a_value_boundary_not_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = IndexWriter::open(dir.path(), IndexWriterConfig::default()).unwrap();
+    for (id, n) in [("a", 7), ("b", -3), ("c", 7), ("d", 12)] {
+        writer.add_document(&doc(id, Some(n))).unwrap();
+    }
+    writer.close().unwrap();
+    let searcher = IndexSearcher::new(DirectoryReader::open(dir.path()).unwrap());
+    let order = sort("n", SortOrder::Asc, MissingValue::Last);
+    let scored = BooleanQuery::new()
+        .should(Query::term("id", "a").constant_score().boost(4.0))
+        .should(Query::term("id", "b").constant_score().boost(2.0))
+        .should(Query::term("id", "c").constant_score().boost(2.0))
+        .should(Query::term("id", "d").constant_score())
+        .build();
+    let first_scores = searcher
+        .search_after(&scored, &Sort::Score, 2, None)
         .unwrap();
+    let next_scores = searcher
+        .search_after(&scored, &Sort::Score, 2, first_scores.last())
+        .unwrap();
+    assert_eq!(
+        first_scores
+            .iter()
+            .map(|h| (h.doc, h.score.to_bits()))
+            .collect::<Vec<_>>(),
+        [(0, 4.0f32.to_bits()), (1, 2.0f32.to_bits())]
+    );
+    assert_eq!(
+        next_scores
+            .iter()
+            .map(|h| (h.doc, h.score.to_bits()))
+            .collect::<Vec<_>>(),
+        [(2, 2.0f32.to_bits()), (3, 1.0f32.to_bits())]
+    );
+    let first = searcher
+        .search_after(&Query::MatchAll, &order, 2, None)
+        .unwrap();
+    assert_eq!(first.iter().map(|h| h.doc).collect::<Vec<_>>(), [1, 0]);
+    // Reconstruct the boundary without any engine-owned state, including on an
+    // independently opened reader of the same commit. Equal sort values use doc ID.
+    let boundary = lucene_rs::FieldDoc {
+        doc: 0,
+        score: 1.0,
+        sort_values: vec![Some(SortValue::I64(7))],
+    };
+    let reopened = IndexSearcher::new(DirectoryReader::open(dir.path()).unwrap());
+    let rest = reopened
+        .search_after(&Query::MatchAll, &order, 2, Some(&boundary))
+        .unwrap();
+    assert_eq!(rest.iter().map(|h| h.doc).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(
+        reopened
+            .search_after(&Query::MatchAll, &order, 2, rest.last())
+            .unwrap(),
+        Vec::<lucene_rs::FieldDoc>::new()
+    );
+    // Batch-size limits are application policy, not the collector's 10,000-hit cap.
+    assert_eq!(
+        searcher
+            .search_after(&Query::MatchAll, &order, 10_001, None)
+            .unwrap()
+            .len(),
+        4
+    );
     assert!(
         searcher
-            .search_page(&positive, &Sort::Score, 1, page.next.as_ref())
+            .search_after(&Query::MatchAll, &order, 0, None)
+            .is_err()
+    );
+    for values in [
+        vec![],
+        vec![Some(SortValue::Keyword("wrong".into()))],
+        vec![Some(SortValue::F64(f64::NAN))],
+    ] {
+        let invalid = lucene_rs::FieldDoc {
+            sort_values: values,
+            ..boundary.clone()
+        };
+        assert!(
+            searcher
+                .search_after(&Query::MatchAll, &order, 2, Some(&invalid))
+                .is_err()
+        );
+    }
+    assert!(
+        searcher
+            .search_after(&Query::MatchAll, &Sort::Score, 2, Some(&boundary))
+            .is_err()
+    );
+    let invalid = lucene_rs::FieldDoc {
+        score: f32::NAN,
+        sort_values: vec![],
+        ..boundary
+    };
+    assert!(
+        searcher
+            .search_after(&Query::MatchAll, &Sort::Score, 2, Some(&invalid))
             .is_err()
     );
 }

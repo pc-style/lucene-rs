@@ -67,4 +67,4 @@ pub use index::doc_values::SortValue;
 pub use index::{DirectoryReader, IndexWriter, IndexWriterConfig, OpenMode, Term};
 pub use queryparser::QueryParser;
 pub use search::{BooleanQuery, IndexSearcher, Occur, PhraseQuery, Query, ScoreDoc, TopDocs};
-pub use search::{FieldDoc, MissingValue, SearchCursor, SearchPage, Sort, SortField, SortOrder};
+pub use search::{FieldDoc, MissingValue, Sort, SortField, SortOrder};
